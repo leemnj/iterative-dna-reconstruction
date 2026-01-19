@@ -269,6 +269,7 @@ def load_models(device, model_configs=None):
     if model_configs is None:
         model_configs = {
             "DNABERT-2": "zhihan1996/DNABERT-2-117M",
+            "NT-v2-50m": "InstaDeepAI/nucleotide-transformer-v2-50m-multi-species",
             "NT-v2-500m": "InstaDeepAI/nucleotide-transformer-v2-500m-multi-species",
         }
     
