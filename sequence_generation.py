@@ -16,13 +16,37 @@ from tqdm import tqdm as tqdm_std
 
 
 # Gene collection configurations
-DEFAULT_GENE_UIDS = {
-    'GAPDH': 'NM_002046.7',
-    'STAT3': 'NM_139276.3',
-    'GAPDHP1': 'NG_001123.6'
+DEFAULT_GENES = {
+    # --- 1. Original List (기존 목록) ---
+    "H4C1":    {"id": "NM_003538",    "type": "Coding",     "status": "Real",       "sequence": None},
+    "TP53":    {"id": "NM_000546",    "type": "Coding",     "status": "Real",       "sequence": None},
+    "GAPDH":   {"id": "NM_002046",    "type": "Coding",     "status": "Real",       "sequence": None},
+    "GAPDHP1": {"id": "NG_001123",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
+    "NORAD":   {"id": "NR_027451",    "type": "Non-coding", "status": "Real",       "sequence": None},
+    "STAT3":   {"id": "NM_139276",    "type": "Coding",     "status": "Real",       "sequence": None},
+
+    # --- 2. Length/Exon Comparison (길이 및 엑손 개수 극단값 비교) ---
+    "TTN":     {"id": "NM_001267550", "type": "Coding",     "status": "Real",       "sequence": None},  # Longest
+    "HBB":     {"id": "NM_000518",    "type": "Coding",     "status": "Real",       "sequence": None},  # Short
+
+    # --- 3. Coding vs Non-coding: Length Matched Pairs (길이 통제 비교) ---
+    # Pair A (~2.3kb)
+    "HOXC11":  {"id": "NM_014212",    "type": "Coding",     "status": "Real",       "sequence": None},
+    "HOTAIR":  {"id": "NR_003716",    "type": "Non-coding", "status": "Real",       "sequence": None},
+    # Pair B (~3.7kb)
+    "VEGFA":   {"id": "NM_003376",    "type": "Coding",     "status": "Real",       "sequence": None},
+    "NEAT1":   {"id": "NR_003513",    "type": "Non-coding", "status": "Real",       "sequence": None},
+
+    # --- 4. Real vs Pseudogene Comparison (서열 유사도 및 길이 통제) ---
+    # Sequence Similarity Focus (서열 패턴 비교용)
+    "PTEN":    {"id": "NM_000314",    "type": "Coding",     "status": "Real",       "sequence": None},
+    "PTENP1":  {"id": "NR_023917",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
+    # Length Control Focus (길이 변인 통제용)
+    "TPI1":    {"id": "NM_000365",    "type": "Coding",     "status": "Real",       "sequence": None},
+    "TPI1P1":  {"id": "NG_008262.2",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
 }
 
-DEFAULT_GENES_TO_SEARCH = ['H4C1', 'TP53', 'NORAD']
+DEFAULT_GENES_TO_SEARCH = []
 
 DEFAULT_DECODING_STRATEGIES = {
     "greedy": {
@@ -46,14 +70,15 @@ def fetch_gene_sequences(email, gene_uids=None, genes_to_search=None):
     
     Args:
         email (str): Email for NCBI Entrez queries
-        gene_uids (dict): Dictionary of {gene_name: UID}. Uses DEFAULT_GENE_UIDS if None.
+        gene_uids (dict): {gene_name: UID} or {gene_name: metadata dict with "id"}.
+            Uses DEFAULT_GENES if None.
         genes_to_search (list): List of gene names to search. Uses DEFAULT_GENES_TO_SEARCH if None.
         
     Returns:
         dict: Dictionary of {gene_name: sequence}
     """
     if gene_uids is None:
-        gene_uids = DEFAULT_GENE_UIDS
+        gene_uids = DEFAULT_GENES
     if genes_to_search is None:
         genes_to_search = DEFAULT_GENES_TO_SEARCH
     
@@ -69,7 +94,9 @@ def fetch_gene_sequences(email, gene_uids=None, genes_to_search=None):
     print("Fetching gene sequences from NCBI...")
     
     # Fetch genes by specific UID
-    for gene_name, uid in gene_uids.items():
+    for gene_name, uid_or_meta in gene_uids.items():
+        is_meta = isinstance(uid_or_meta, dict)
+        uid = uid_or_meta.get("id") if is_meta else uid_or_meta
         print(f"Fetching {gene_name} by UID {uid}...")
         try:
             handle = Entrez.efetch(db="nucleotide", id=uid, rettype="fasta", retmode="text")
@@ -77,7 +104,10 @@ def fetch_gene_sequences(email, gene_uids=None, genes_to_search=None):
             handle.close()
             
             seq_obj = SeqIO.read(io.StringIO(fasta_record), "fasta")
-            gene_selection[gene_name] = str(seq_obj.seq)
+            sequence = str(seq_obj.seq)
+            gene_selection[gene_name] = sequence
+            if is_meta:
+                uid_or_meta["sequence"] = sequence
             print(f"  ✅ Found and added sequence for {gene_name} (Length: {len(str(seq_obj.seq))}bp)")
         except Exception as e:
             print(f"  ❌ Error fetching {gene_name} by UID {uid}: {e}")
@@ -103,7 +133,11 @@ def fetch_gene_sequences(email, gene_uids=None, genes_to_search=None):
                 handle.close()
                 
                 seq_obj = SeqIO.read(io.StringIO(fasta_record), "fasta")
-                gene_selection[gene_name] = str(seq_obj.seq)
+                sequence = str(seq_obj.seq)
+                gene_selection[gene_name] = sequence
+                meta = gene_uids.get(gene_name)
+                if isinstance(meta, dict):
+                    meta["sequence"] = sequence
                 print(f"  ✅ Found and added sequence for {gene_name} (Length: {len(str(seq_obj.seq))}bp)")
             else:
                 print(f"  ❌ No sequence found for {gene_name}")
