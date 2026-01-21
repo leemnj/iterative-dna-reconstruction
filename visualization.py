@@ -12,140 +12,18 @@ from pathlib import Path
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.decomposition import PCA
 from collections import Counter
-import math
-from sequence_generation import load_sequences_compressed, load_from_parts
-
-
-def cosine_series_from_embeddings(embeddings):
-    """
-    Compute cosine similarity series relative to the first embedding.
-    
-    Args:
-        embeddings (list): List of embedding arrays
-        
-    Returns:
-        list: List of cosine similarity values
-    """
-    if not embeddings:
-        return []
-    
-    base = embeddings[0].reshape(1, -1)
-    sims = []
-    for emb in embeddings:
-        vec = emb.reshape(1, -1)
-        sims.append(float(cosine_similarity(base, vec)[0, 0]))
-    return sims
-
-
-def calculate_shannon_entropy(sequence):
-    """
-    Calculate Shannon entropy for a DNA sequence.
-    
-    Args:
-        sequence (str): DNA sequence
-        
-    Returns:
-        float: Shannon entropy
-    """
-    if not sequence:
-        return 0.0
-    
-    sequence_length = len(sequence)
-    nucleotide_counts = Counter(sequence.upper())
-    entropy = 0.0
-    
-    for count in nucleotide_counts.values():
-        p = count / sequence_length
-        if p > 0:
-            entropy -= p * math.log2(p)
-    
-    return entropy
-
-
-def set_publication_style(font_family="Times New Roman", dpi=300):
-    """
-    Set Matplotlib/Seaborn style for publication-quality figures.
-    
-    Args:
-        font_family (str): Preferred font family ("Times New Roman" or "Arial")
-        dpi (int): Figure DPI for on-screen rendering and saving
-    """
-    sns.set_theme(style="whitegrid")
-    plt.rcParams.update({
-        "font.family": font_family,
-        "font.size": 11,
-        "axes.titlesize": 12,
-        "axes.labelsize": 11,
-        "legend.fontsize": 9,
-        "xtick.labelsize": 9,
-        "ytick.labelsize": 9,
-        "figure.dpi": dpi,
-        "savefig.dpi": dpi,
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-    })
-
-
-def prepare_sequence_metrics(df):
-    """
-    Add sequence length and Shannon entropy columns to a dataframe.
-    
-    Args:
-        df (pd.DataFrame): Input dataframe with a "Sequence" column
-    
-    Returns:
-        pd.DataFrame: Copy with "SequenceLength" and "ShannonEntropy" columns
-    """
-    df = df.copy()
-    if "Sequence" in df.columns:
-        df["SequenceLength"] = df["Sequence"].astype(str).str.len()
-        df["ShannonEntropy"] = df["Sequence"].apply(calculate_shannon_entropy)
-    return df
-
-
-def compute_gc_content(sequence):
-    """
-    Compute GC content ratio for a DNA sequence.
-    
-    Args:
-        sequence (str): DNA sequence
-        
-    Returns:
-        float: GC content ratio (0-1)
-    """
-    if not sequence:
-        return 0.0
-    sequence = sequence.upper()
-    gc_count = sequence.count("G") + sequence.count("C")
-    return gc_count / max(len(sequence), 1)
-
-
-def infer_gene_lengths(sequences_dict, prefer_strategy="greedy"):
-    """
-    Infer gene lengths from the first iteration sequence.
-    
-    Args:
-        sequences_dict (dict): {gene_id: {strategy: [sequences]}}
-        prefer_strategy (str): Strategy key to prefer when available
-    
-    Returns:
-        dict: {gene_id: length}
-    """
-    lengths = {}
-    for gene_id, strategies in sequences_dict.items():
-        seq = None
-        if prefer_strategy and prefer_strategy in strategies:
-            seqs = strategies.get(prefer_strategy, [])
-            if seqs:
-                seq = seqs[0]
-        if seq is None:
-            for seqs in strategies.values():
-                if seqs:
-                    seq = seqs[0]
-                    break
-        if seq is not None:
-            lengths[gene_id] = len(seq)
-    return lengths
+from io_utils import load_sequences_compressed, load_from_parts
+from metrics_utils import (
+    cosine_series_from_embeddings,
+    calculate_shannon_entropy,
+    prepare_sequence_metrics,
+    compute_gc_content,
+    infer_gene_lengths,
+    compute_kmer_frequencies,
+    aggregate_kmer_frequencies,
+    compute_vendi_score,
+)
+from plot_utils import set_publication_style
 
 
 def plot_similarity_over_iterations(
@@ -361,21 +239,45 @@ def plot_strategy_collapse_with_ci(
         save_path (str or Path or None): Save path for figure (optional)
     """
     set_publication_style(font_family=font_family, dpi=dpi)
+
+    fig, ax = plt.subplots(figsize=(8.6, 4.8))
+    _plot_strategy_collapse_with_ci_on_ax(
+        ax,
+        embeddings_dict,
+        model_label=model_label,
+        strategies=strategies,
+    )
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+
+    return fig
+
+
+def _plot_strategy_collapse_with_ci_on_ax(
+    ax,
+    embeddings_dict,
+    model_label=None,
+    strategies=None,
+    show_ylabel=True,
+    show_legend=True,
+):
     df = build_similarity_records(embeddings_dict, strategies=strategies)
     if df.empty:
-        print("⚠️ No similarity data available for strategy collapse plot.")
-        return None
-    
+        ax.set_title("No similarity data")
+        ax.set_axis_off()
+        return
+
     summary = (
         df.groupby(["Strategy", "Iteration"])["Similarity"]
         .agg(["mean", "std", "count"])
         .reset_index()
     )
-    
+
     strategy_order = strategies or list(summary["Strategy"].unique())
     palette = sns.color_palette("tab10", n_colors=len(strategy_order))
-    
-    fig, ax = plt.subplots(figsize=(8.6, 4.8))
+
     for idx, strategy_key in enumerate(strategy_order):
         subset = summary[summary["Strategy"] == strategy_key]
         if subset.empty:
@@ -395,21 +297,83 @@ def plot_strategy_collapse_with_ci(
             color=color,
             alpha=0.2,
         )
-    
+
     ax.set_xlabel("Iteration")
-    ax.set_ylabel("Cosine Similarity")
+    if show_ylabel:
+        ax.set_ylabel("Cosine Similarity")
+    else:
+        ax.set_ylabel("")
     ax.set_ylim(0, 1)
     ax.xaxis.set_major_locator(MaxNLocator(integer=True))
-    title = "Model Collapse by Decoding Strategy"
     if model_label:
-        title = f"{title} ({model_label})"
-    ax.set_title(title)
-    ax.legend(title="Strategy")
+        ax.set_title(model_label)
+    if show_legend:
+        ax.legend(title="Strategy")
+
+
+def plot_strategy_collapse_with_ci_side_by_side(
+    all_embeddings,
+    model_labels=None,
+    strategies=None,
+    font_family="Times New Roman",
+    dpi=300,
+    save_path=None,
+):
+    """
+    Plot collapse curves for multiple models side-by-side.
+
+    Args:
+        all_embeddings (dict): {model_label: {gene_id: {strategy: [embeddings]}}}
+        model_labels (list or None): Optional model order
+        strategies (list or None): Optional strategy filter/order
+        font_family (str): Preferred font family
+        dpi (int): Output DPI
+        save_path (str or Path or None): Save path for figure (optional)
+    """
+    set_publication_style(font_family=font_family, dpi=dpi)
+    if not all_embeddings:
+        print("⚠️ No embeddings available for collapse plot.")
+        return None
+
+    model_labels = model_labels or list(all_embeddings.keys())
+    if not model_labels:
+        print("⚠️ No models available for collapse plot.")
+        return None
+
+    n_models = len(model_labels)
+    ncols = 2
+    nrows = (n_models + ncols - 1) // ncols
+    fig, axes = plt.subplots(
+        nrows,
+        ncols,
+        figsize=(6.6 * ncols, 4.4 * nrows),
+        squeeze=False,
+    )
+
+    for idx, model_label in enumerate(model_labels):
+        row_idx, col_idx = divmod(idx, ncols)
+        ax = axes[row_idx, col_idx]
+        embeddings_dict = all_embeddings.get(model_label, {})
+        show_ylabel = col_idx == 0
+        show_legend = idx == 0
+        _plot_strategy_collapse_with_ci_on_ax(
+            ax,
+            embeddings_dict,
+            model_label=model_label,
+            strategies=strategies,
+            show_ylabel=show_ylabel,
+            show_legend=show_legend,
+        )
+
+    for idx in range(n_models, nrows * ncols):
+        row_idx, col_idx = divmod(idx, ncols)
+        axes[row_idx, col_idx].axis("off")
+
+    fig.suptitle("Model Collapse by Decoding Strategy", y=1.02)
     fig.tight_layout()
-    
     if save_path:
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
-    
+
     return fig
 
 
@@ -417,6 +381,9 @@ def plot_similarity_overview_all_models(
     all_embeddings,
     model_labels=None,
     strategy_order=None,
+    sequences_by_model=None,
+    prefer_length_model=None,
+    prefer_strategy="greedy",
     font_family="Times New Roman",
     dpi=300,
     save_path=None,
@@ -428,6 +395,9 @@ def plot_similarity_overview_all_models(
         all_embeddings (dict): {model_label: {gene_id: {strategy: [embeddings]}}}
         model_labels (list or None): Optional model order
         strategy_order (list or None): Optional strategy order
+        sequences_by_model (dict or None): {model_label: {gene_id: {strategy: [sequences]}}}
+        prefer_length_model (str or None): Model key to use for length inference
+        prefer_strategy (str): Strategy key to use for length inference
         font_family (str): Preferred font family
         dpi (int): Output DPI
         save_path (str or Path or None): Save path for figure (optional)
@@ -458,11 +428,29 @@ def plot_similarity_overview_all_models(
         print("⚠️ No strategies available for overview plot.")
         return None
     
-    fig, axes = plt.subplots(
-        num_rows, num_cols, figsize=(4.2 * num_cols, 3.1 * num_rows), squeeze=False
+    fig = plt.figure(figsize=(4.2 * num_cols, 3.1 * num_rows + 1.2))
+    grid = fig.add_gridspec(
+        num_rows + 1,
+        num_cols,
+        height_ratios=[1] * num_rows + [0.4],
+        hspace=0.35,
+        wspace=0.3,
     )
-    legend_handles = []
-    legend_labels = []
+    axes = np.empty((num_rows, num_cols), dtype=object)
+    for row_idx in range(num_rows):
+        for col_idx in range(num_cols):
+            axes[row_idx, col_idx] = fig.add_subplot(grid[row_idx, col_idx])
+    sequences_by_model = sequences_by_model or {}
+    legend_handles_map = {}
+    gene_length_map = {}
+
+    length_model = prefer_length_model
+    if length_model is None:
+        length_model = next(iter(sequences_by_model), None)
+    if length_model and length_model in sequences_by_model:
+        gene_length_map = infer_gene_lengths(
+            sequences_by_model[length_model], prefer_strategy=prefer_strategy
+        )
     
     for row_idx, model_label in enumerate(model_labels):
         model_data = all_embeddings.get(model_label, {})
@@ -484,9 +472,8 @@ def plot_similarity_overview_all_models(
                     linewidth=1.1,
                     label=gene_name,
                 )
-                if gene_name not in legend_labels:
-                    legend_handles.append(line)
-                    legend_labels.append(gene_name)
+                if gene_name not in legend_handles_map:
+                    legend_handles_map[gene_name] = line
             if row_idx == 0:
                 ax.set_title(f"{strategy_key}")
             if col_idx == 0:
@@ -499,57 +486,28 @@ def plot_similarity_overview_all_models(
             ax.grid(True, linestyle="--", alpha=0.4)
     
     fig.suptitle("Semantic Similarity Overview", y=1.02)
-    if legend_handles:
-        fig.legend(
-            legend_handles,
-            legend_labels,
+    if legend_handles_map:
+        legend_order = list(legend_handles_map.keys())
+        if gene_length_map:
+            legend_order.sort(key=lambda g: (gene_length_map.get(g, float("inf")), g))
+        handles = [legend_handles_map[g] for g in legend_order]
+        labels = legend_order
+
+        legend_ax = fig.add_subplot(grid[-1, :])
+        legend_ax.axis("off")
+        legend_ax.legend(
+            handles,
+            labels,
             title="Gene",
-            loc="center left",
-            bbox_to_anchor=(1.02, 0.5),
+            loc="center",
+            ncol=max(1, min(len(labels), 8)),
+            mode="expand",
         )
-    fig.tight_layout()
     
     if save_path:
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
     
     return fig
-
-
-def compute_kmer_frequencies(sequence, k=6):
-    """
-    Compute k-mer frequency distribution for a sequence.
-    
-    Args:
-        sequence (str): DNA sequence
-        k (int): k-mer length
-    
-    Returns:
-        dict: {kmer: count}
-    """
-    if not sequence or k <= 0 or len(sequence) < k:
-        return {}
-    sequence = sequence.upper()
-    counts = Counter(sequence[i:i + k] for i in range(len(sequence) - k + 1))
-    return dict(counts)
-
-
-def aggregate_kmer_frequencies(sequences, k=6):
-    """
-    Aggregate k-mer frequencies across multiple sequences.
-    
-    Args:
-        sequences (list): List of sequences
-        k (int): k-mer length
-    
-    Returns:
-        dict: {kmer: mean_count}
-    """
-    if not sequences:
-        return {}
-    aggregate = Counter()
-    for seq in sequences:
-        aggregate.update(compute_kmer_frequencies(seq, k=k))
-    return dict(aggregate)
 
 
 def plot_kmer_distribution_pair(
@@ -828,44 +786,17 @@ def plot_final_similarity_vs_gene_property_by_strategy(
         save_path (str or Path or None): Save path for figure (optional)
     """
     set_publication_style(font_family=font_family, dpi=dpi)
-    gene_metadata = gene_metadata or {}
-    sequences_dict = sequences_dict or {}
-    
-    if property_key not in {"length", "exon_count"}:
-        raise ValueError(f"Unknown property key: {property_key}")
-    
-    property_map = {}
-    if property_key == "length":
-        property_map = infer_gene_lengths(
-            sequences_dict, prefer_strategy=prefer_strategy
-        )
-        for gene_id, meta in gene_metadata.items():
-            if isinstance(meta, dict) and meta.get("length") is not None:
-                property_map[gene_id] = meta["length"]
-    else:
-        for gene_id, meta in gene_metadata.items():
-            if isinstance(meta, dict) and meta.get("exon_count") is not None:
-                property_map[gene_id] = meta["exon_count"]
-    
+    df, property_map = _build_final_similarity_property_df(
+        embeddings_dict,
+        sequences_dict=sequences_dict,
+        gene_metadata=gene_metadata,
+        property_key=property_key,
+        strategies=strategies,
+        prefer_strategy=prefer_strategy,
+    )
     if not property_map:
         print(f"⚠️ No gene property data available for {property_key}.")
         return None
-    
-    records = []
-    for gene_id, strategies_map in embeddings_dict.items():
-        for strategy_key, embs in strategies_map.items():
-            if strategies and strategy_key not in strategies:
-                continue
-            sims = cosine_series_from_embeddings(embs)
-            if not sims:
-                continue
-            records.append({
-                "Gene": gene_id,
-                "Strategy": strategy_key,
-                "FinalSimilarity": sims[-1],
-                "Property": property_map.get(gene_id),
-            })
-    df = pd.DataFrame(records).dropna(subset=["Property"])
     if df.empty:
         print("⚠️ No matching genes found for property mapping.")
         return None
@@ -921,6 +852,180 @@ def plot_final_similarity_vs_gene_property_by_strategy(
     return fig
 
 
+def _build_final_similarity_property_df(
+    embeddings_dict,
+    sequences_dict=None,
+    gene_metadata=None,
+    property_key="length",
+    strategies=None,
+    prefer_strategy=None,
+):
+    gene_metadata = gene_metadata or {}
+    sequences_dict = sequences_dict or {}
+
+    if property_key not in {"length", "exon_count"}:
+        raise ValueError(f"Unknown property key: {property_key}")
+
+    property_map = {}
+    if property_key == "length":
+        property_map = infer_gene_lengths(
+            sequences_dict, prefer_strategy=prefer_strategy
+        )
+        for gene_id, meta in gene_metadata.items():
+            if isinstance(meta, dict) and meta.get("length") is not None:
+                property_map[gene_id] = meta["length"]
+    else:
+        for gene_id, meta in gene_metadata.items():
+            if isinstance(meta, dict) and meta.get("exon_count") is not None:
+                property_map[gene_id] = meta["exon_count"]
+
+    if not property_map:
+        return pd.DataFrame(), property_map
+
+    records = []
+    for gene_id, strategies_map in embeddings_dict.items():
+        for strategy_key, embs in strategies_map.items():
+            if strategies and strategy_key not in strategies:
+                continue
+            sims = cosine_series_from_embeddings(embs)
+            if not sims:
+                continue
+            records.append({
+                "Gene": gene_id,
+                "Strategy": strategy_key,
+                "FinalSimilarity": sims[-1],
+                "Property": property_map.get(gene_id),
+            })
+
+    df = pd.DataFrame(records).dropna(subset=["Property"])
+    return df, property_map
+
+
+def plot_final_similarity_vs_gene_property_by_strategy_side_by_side(
+    all_embeddings,
+    sequences_by_model=None,
+    gene_metadata=None,
+    property_key="length",
+    strategies=None,
+    model_labels=None,
+    log_x=False,
+    font_family="Times New Roman",
+    dpi=300,
+    save_path=None,
+):
+    """
+    Plot final similarity vs gene property for each model as a 2x2 strategy grid,
+    and place models side-by-side.
+    """
+    set_publication_style(font_family=font_family, dpi=dpi)
+    if not all_embeddings:
+        print("⚠️ No embeddings available for plot.")
+        return None
+
+    model_labels = model_labels or list(all_embeddings.keys())
+    if not model_labels:
+        print("⚠️ No models available for plot.")
+        return None
+
+    sequences_by_model = sequences_by_model or {}
+    n_models = len(model_labels)
+    ncols = 2
+    nrows = (n_models + ncols - 1) // ncols
+    base_w, base_h = plt.rcParams.get("figure.figsize", (6.4, 4.8))
+    fig = plt.figure(
+        figsize=(base_w * ncols * 0.95, base_h * nrows * 0.95),
+        constrained_layout=True,
+    )
+    outer_grid = fig.add_gridspec(nrows, ncols, wspace=0.25, hspace=0.35)
+
+    for idx, model_label in enumerate(model_labels):
+        row_idx, col_idx = divmod(idx, ncols)
+        embeddings_dict = all_embeddings.get(model_label, {})
+        sequences_dict = sequences_by_model.get(model_label, {})
+
+        df, property_map = _build_final_similarity_property_df(
+            embeddings_dict,
+            sequences_dict=sequences_dict,
+            gene_metadata=gene_metadata,
+            property_key=property_key,
+            strategies=strategies,
+            prefer_strategy=None,
+        )
+
+        model_grid = outer_grid[row_idx, col_idx].subgridspec(
+            2, 2, wspace=0.3, hspace=0.35
+        )
+        axes = []
+        for sub_r in range(2):
+            for sub_c in range(2):
+                axes.append(fig.add_subplot(model_grid[sub_r, sub_c]))
+
+        if not property_map or df.empty:
+            for ax in axes:
+                ax.set_axis_off()
+            bbox = outer_grid[row_idx, col_idx].get_position(fig)
+            fig.text(
+                (bbox.x0 + bbox.x1) / 2,
+                (bbox.y0 + bbox.y1) / 2,
+                f"No data for {model_label}",
+                ha="center",
+                va="center",
+            )
+        else:
+            strategy_order = strategies or list(df["Strategy"].unique())
+            strategy_order = strategy_order[:4]
+            palette = sns.color_palette("tab10", n_colors=len(strategy_order))
+
+            for ax_idx, ax in enumerate(axes):
+                if ax_idx >= len(strategy_order):
+                    ax.axis("off")
+                    continue
+                strategy_key = strategy_order[ax_idx]
+                color = palette[ax_idx % len(palette)]
+                subset = df[df["Strategy"] == strategy_key]
+                sns.scatterplot(
+                    data=subset,
+                    x="Property",
+                    y="FinalSimilarity",
+                    ax=ax,
+                    s=70,
+                    color=color,
+                    edgecolor="white",
+                    linewidth=0.4,
+                )
+                ax.set_title(strategy_key)
+                ax.set_ylim(0, 1)
+                if log_x:
+                    ax.set_xscale("log")
+                xlabel = "Gene Length (bp)" if property_key == "length" else "Exon Count"
+                if ax_idx >= 2:
+                    ax.set_xlabel(xlabel)
+                else:
+                    ax.set_xlabel("")
+                if ax_idx % 2 == 0:
+                    ax.set_ylabel("Final Cosine Similarity")
+                else:
+                    ax.set_ylabel("")
+
+            bbox = outer_grid[row_idx, col_idx].get_position(fig)
+            fig.text(
+                (bbox.x0 + bbox.x1) / 2,
+                bbox.y1 + 0.01,
+                model_label,
+                ha="center",
+                va="bottom",
+            )
+
+    for idx in range(n_models, nrows * ncols):
+        row_idx, col_idx = divmod(idx, ncols)
+        empty_ax = fig.add_subplot(outer_grid[row_idx, col_idx])
+        empty_ax.axis("off")
+
+    fig.suptitle("Gene Length vs. Final Similarity")
+    if save_path:
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+
+    return fig
 def plot_final_similarity_raincloud_by_gene_type(
     embeddings_dict,
     gene_type_map,
@@ -1023,6 +1128,184 @@ def plot_final_similarity_raincloud_by_gene_type(
     if save_path:
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
     
+    return fig
+
+
+def _plot_final_similarity_raincloud_by_gene_type_on_ax(
+    ax,
+    embeddings_dict,
+    gene_type_map,
+    strategies=None,
+    model_label=None,
+    palette=None,
+    swap_axes=False,
+    show_ylabel=True,
+):
+    if not gene_type_map:
+        ax.set_axis_off()
+        return
+
+    records = []
+    for gene_id, strategies_map in embeddings_dict.items():
+        gene_type = gene_type_map.get(gene_id)
+        if gene_type is None:
+            continue
+        for strategy_key, embs in strategies_map.items():
+            if strategies and strategy_key not in strategies:
+                continue
+            sims = cosine_series_from_embeddings(embs)
+            if not sims:
+                continue
+            records.append({
+                "Gene": gene_id,
+                "GeneType": gene_type,
+                "Strategy": strategy_key,
+                "FinalSimilarity": sims[-1],
+            })
+    df = pd.DataFrame(records)
+    if df.empty:
+        ax.set_axis_off()
+        return
+
+    if palette is None:
+        palette = {"Coding": "#4C78A8", "Non-coding": "#F58518"}
+    order = ["Coding", "Non-coding"]
+
+    if swap_axes:
+        sns.violinplot(
+            data=df,
+            x="FinalSimilarity",
+            y="GeneType",
+            hue="GeneType",
+            order=order,
+            palette=palette,
+            inner=None,
+            cut=0,
+            linewidth=1.0,
+            ax=ax,
+            legend=False,
+        )
+        sns.boxplot(
+            data=df,
+            x="FinalSimilarity",
+            y="GeneType",
+            order=order,
+            width=0.18,
+            showcaps=False,
+            boxprops={"facecolor": "white", "alpha": 0.9},
+            showfliers=False,
+            whiskerprops={"linewidth": 1.0},
+            ax=ax,
+        )
+        sns.stripplot(
+            data=df,
+            x="FinalSimilarity",
+            y="GeneType",
+            hue="GeneType",
+            order=order,
+            size=4,
+            jitter=0.25,
+            alpha=0.6,
+            palette=palette,
+            ax=ax,
+            legend=False,
+        )
+        ax.set_xlabel("Final Cosine Similarity")
+        ax.set_xlim(0.6, 1.0)
+        ax.set_ylabel("Gene Type" if show_ylabel else "")
+    else:
+        sns.violinplot(
+            data=df,
+            x="GeneType",
+            y="FinalSimilarity",
+            hue="GeneType",
+            order=order,
+            palette=palette,
+            inner=None,
+            cut=0,
+            linewidth=1.0,
+            ax=ax,
+            legend=False,
+        )
+        sns.boxplot(
+            data=df,
+            x="GeneType",
+            y="FinalSimilarity",
+            order=order,
+            width=0.18,
+            showcaps=False,
+            boxprops={"facecolor": "white", "alpha": 0.9},
+            showfliers=False,
+            whiskerprops={"linewidth": 1.0},
+            ax=ax,
+        )
+        sns.stripplot(
+            data=df,
+            x="GeneType",
+            y="FinalSimilarity",
+            hue="GeneType",
+            order=order,
+            size=4,
+            jitter=0.25,
+            alpha=0.6,
+            palette=palette,
+            ax=ax,
+            legend=False,
+        )
+        ax.set_xlabel("Gene Type")
+        ax.set_ylabel("Final Cosine Similarity" if show_ylabel else "")
+        ax.set_ylim(0, 1)
+
+    if model_label:
+        ax.set_title(model_label)
+
+
+def plot_final_similarity_raincloud_by_gene_type_side_by_side(
+    all_embeddings,
+    gene_type_map,
+    strategies=None,
+    model_labels=None,
+    palette=None,
+    font_family="Times New Roman",
+    dpi=300,
+    save_path=None,
+):
+    """
+    Plot gene-type rainclouds side-by-side by model with axes swapped.
+    """
+    set_publication_style(font_family=font_family, dpi=dpi)
+    if not all_embeddings:
+        print("⚠️ No embeddings available for raincloud plot.")
+        return None
+
+    model_labels = model_labels or list(all_embeddings.keys())
+    if not model_labels:
+        print("⚠️ No models available for raincloud plot.")
+        return None
+
+    n_models = len(model_labels)
+    fig = plt.figure(figsize=(6.8 * n_models, 4.6))
+    grid = fig.add_gridspec(1, n_models, wspace=0.25)
+
+    for idx, model_label in enumerate(model_labels):
+        ax = fig.add_subplot(grid[0, idx])
+        embeddings_dict = all_embeddings.get(model_label, {})
+        show_ylabel = idx == 0
+        _plot_final_similarity_raincloud_by_gene_type_on_ax(
+            ax,
+            embeddings_dict,
+            gene_type_map,
+            strategies=strategies,
+            model_label=model_label,
+            palette=palette,
+            swap_axes=True,
+            show_ylabel=show_ylabel,
+        )
+
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+
     return fig
 
 
@@ -1137,6 +1420,193 @@ def plot_final_similarity_raincloud_by_gene_status(
     if save_path:
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
     
+    return fig
+
+
+def _plot_final_similarity_raincloud_by_gene_status_on_ax(
+    ax,
+    embeddings_dict,
+    gene_status_map,
+    gene_type_map=None,
+    type_filter=None,
+    strategies=None,
+    model_label=None,
+    palette=None,
+    swap_axes=False,
+    show_ylabel=True,
+):
+    if not gene_status_map:
+        ax.set_axis_off()
+        return
+
+    records = []
+    for gene_id, strategies_map in embeddings_dict.items():
+        status = gene_status_map.get(gene_id)
+        if status is None:
+            continue
+        if type_filter and gene_type_map is not None:
+            if gene_type_map.get(gene_id) != type_filter:
+                continue
+        for strategy_key, embs in strategies_map.items():
+            if strategies and strategy_key not in strategies:
+                continue
+            sims = cosine_series_from_embeddings(embs)
+            if not sims:
+                continue
+            records.append({
+                "Gene": gene_id,
+                "Status": status,
+                "Strategy": strategy_key,
+                "FinalSimilarity": sims[-1],
+            })
+    df = pd.DataFrame(records)
+    if df.empty:
+        ax.set_axis_off()
+        return
+
+    if palette is None:
+        palette = {"Real": "#54A24B", "Pseudogene": "#E45756"}
+    order = ["Real", "Pseudogene"]
+
+    if swap_axes:
+        sns.violinplot(
+            data=df,
+            x="FinalSimilarity",
+            y="Status",
+            hue="Status",
+            order=order,
+            palette=palette,
+            inner=None,
+            cut=0,
+            linewidth=1.0,
+            ax=ax,
+            legend=False,
+        )
+        sns.boxplot(
+            data=df,
+            x="FinalSimilarity",
+            y="Status",
+            order=order,
+            width=0.18,
+            showcaps=False,
+            boxprops={"facecolor": "white", "alpha": 0.9},
+            showfliers=False,
+            whiskerprops={"linewidth": 1.0},
+            ax=ax,
+        )
+        sns.stripplot(
+            data=df,
+            x="FinalSimilarity",
+            y="Status",
+            hue="Status",
+            order=order,
+            size=4,
+            jitter=0.25,
+            alpha=0.6,
+            palette=palette,
+            ax=ax,
+            legend=False,
+        )
+        ax.set_xlabel("Final Cosine Similarity")
+        ax.set_xlim(0.6, 1.0)
+        ax.set_ylabel("Gene Status" if show_ylabel else "")
+    else:
+        sns.violinplot(
+            data=df,
+            x="Status",
+            y="FinalSimilarity",
+            hue="Status",
+            order=order,
+            palette=palette,
+            inner=None,
+            cut=0,
+            linewidth=1.0,
+            ax=ax,
+            legend=False,
+        )
+        sns.boxplot(
+            data=df,
+            x="Status",
+            y="FinalSimilarity",
+            order=order,
+            width=0.18,
+            showcaps=False,
+            boxprops={"facecolor": "white", "alpha": 0.9},
+            showfliers=False,
+            whiskerprops={"linewidth": 1.0},
+            ax=ax,
+        )
+        sns.stripplot(
+            data=df,
+            x="Status",
+            y="FinalSimilarity",
+            hue="Status",
+            order=order,
+            size=4,
+            jitter=0.25,
+            alpha=0.6,
+            palette=palette,
+            ax=ax,
+            legend=False,
+        )
+        ax.set_xlabel("Gene Status")
+        ax.set_ylabel("Final Cosine Similarity" if show_ylabel else "")
+        ax.set_ylim(0, 1)
+
+    if model_label:
+        ax.set_title(model_label)
+
+
+def plot_final_similarity_raincloud_by_gene_status_side_by_side(
+    all_embeddings,
+    gene_status_map,
+    gene_type_map=None,
+    type_filter=None,
+    strategies=None,
+    model_labels=None,
+    palette=None,
+    font_family="Times New Roman",
+    dpi=300,
+    save_path=None,
+):
+    """
+    Plot gene-status rainclouds side-by-side by model with axes swapped.
+    """
+    set_publication_style(font_family=font_family, dpi=dpi)
+    if not all_embeddings:
+        print("⚠️ No embeddings available for raincloud plot.")
+        return None
+
+    model_labels = model_labels or list(all_embeddings.keys())
+    if not model_labels:
+        print("⚠️ No models available for raincloud plot.")
+        return None
+
+    n_models = len(model_labels)
+    fig = plt.figure(figsize=(6.8 * n_models, 4.6))
+    grid = fig.add_gridspec(1, n_models, wspace=0.25)
+
+    for idx, model_label in enumerate(model_labels):
+        ax = fig.add_subplot(grid[0, idx])
+        embeddings_dict = all_embeddings.get(model_label, {})
+        show_ylabel = idx == 0
+        _plot_final_similarity_raincloud_by_gene_status_on_ax(
+            ax,
+            embeddings_dict,
+            gene_status_map,
+            gene_type_map=gene_type_map,
+            type_filter=type_filter,
+            strategies=strategies,
+            model_label=model_label,
+            palette=palette,
+            swap_axes=True,
+            show_ylabel=show_ylabel,
+        )
+
+    fig.tight_layout()
+    if save_path:
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+
     return fig
 
 
@@ -1346,6 +1816,150 @@ def plot_pca_trajectory_gene_pairs(
     if save_path:
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
     
+    return fig
+
+
+def _flatten_embeddings_list(emb_list):
+    flat = []
+    for emb in emb_list:
+        if emb is None:
+            continue
+        vec = np.asarray(emb, dtype=np.float64).reshape(-1)
+        if not np.all(np.isfinite(vec)):
+            continue
+        flat.append(vec)
+    return flat
+
+
+def compute_vendi_series_across_genes(embeddings_dict, strategy):
+    """
+    Compute Vendi score across genes for each iteration.
+    """
+    gene_series = []
+    for gene_id, strategies_map in embeddings_dict.items():
+        embs = strategies_map.get(strategy, [])
+        if not embs:
+            continue
+        gene_series.append(_flatten_embeddings_list(embs))
+
+    if not gene_series:
+        return []
+
+    min_len = min(len(series) for series in gene_series)
+    vendi_series = []
+    for idx in range(min_len):
+        step_embeddings = [series[idx] for series in gene_series if idx < len(series)]
+        vendi_series.append(compute_vendi_score(step_embeddings))
+    return vendi_series
+
+
+def compute_gene_vendi_over_time(embeddings_dict, strategy):
+    """
+    Compute per-gene Vendi score over the full trajectory.
+    """
+    vendi_by_gene = {}
+    for gene_id, strategies_map in embeddings_dict.items():
+        embs = strategies_map.get(strategy, [])
+        flat = _flatten_embeddings_list(embs)
+        if not flat:
+            continue
+        vendi_by_gene[gene_id] = compute_vendi_score(flat)
+    return vendi_by_gene
+
+
+def plot_vendi_model_comparison(
+    all_embeddings,
+    strategy="sampling_t1.0",
+    model_labels=None,
+    font_family="Times New Roman",
+    dpi=300,
+    save_path=None,
+):
+    """
+    Compare models using Vendi score at a fixed decoding strategy.
+
+    Top: Vendi across genes over iterations.
+    Bottom: Per-gene Vendi over trajectory (model comparison).
+    """
+    set_publication_style(font_family=font_family, dpi=dpi)
+    if not all_embeddings:
+        print("⚠️ No embeddings available for Vendi comparison.")
+        return None
+
+    model_labels = model_labels or list(all_embeddings.keys())
+    if not model_labels:
+        print("⚠️ No models available for Vendi comparison.")
+        return None
+
+    series_records = []
+    gene_records = []
+    for model_label in model_labels:
+        embeddings_dict = all_embeddings.get(model_label, {})
+        series = compute_vendi_series_across_genes(embeddings_dict, strategy)
+        for idx, value in enumerate(series):
+            series_records.append({
+                "Model": model_label,
+                "Iteration": idx,
+                "Vendi": value,
+            })
+        vendi_by_gene = compute_gene_vendi_over_time(embeddings_dict, strategy)
+        for gene_id, value in vendi_by_gene.items():
+            gene_records.append({
+                "Model": model_label,
+                "Gene": gene_id,
+                "Vendi": value,
+            })
+
+    series_df = pd.DataFrame(series_records)
+    gene_df = pd.DataFrame(gene_records)
+
+    fig = plt.figure(figsize=(8.6, 6.6))
+    grid = fig.add_gridspec(2, 1, height_ratios=[2.0, 1.2], hspace=0.3)
+    ax_top = fig.add_subplot(grid[0, 0])
+    ax_bottom = fig.add_subplot(grid[1, 0])
+
+    if not series_df.empty:
+        sns.lineplot(
+            data=series_df,
+            x="Iteration",
+            y="Vendi",
+            hue="Model",
+            marker="o",
+            ax=ax_top,
+        )
+        ax_top.set_title(f"Vendi Over Iterations ({strategy})")
+        ax_top.set_xlabel("Iteration")
+        ax_top.set_ylabel("Vendi Score")
+        ax_top.xaxis.set_major_locator(MaxNLocator(integer=True))
+    else:
+        ax_top.set_axis_off()
+
+    if not gene_df.empty:
+        sns.boxplot(
+            data=gene_df,
+            x="Model",
+            y="Vendi",
+            ax=ax_bottom,
+        )
+        sns.stripplot(
+            data=gene_df,
+            x="Model",
+            y="Vendi",
+            color="black",
+            alpha=0.35,
+            jitter=0.18,
+            size=4,
+            ax=ax_bottom,
+        )
+        ax_bottom.set_xlabel("Model")
+        ax_bottom.set_ylabel("Gene Vendi Score")
+    else:
+        ax_bottom.set_axis_off()
+
+    fig.suptitle("Model Comparison with Vendi Score", y=1.02)
+    if save_path:
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+
     return fig
 
 
