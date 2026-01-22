@@ -131,6 +131,21 @@ class SequenceEvolver:
             ).to(device)
         self.model.eval()
         print(f"[{model_label}] Model loaded successfully.")
+        # DNABERT-2: alibi 캐시를 1024로 한번에 키우기
+        if model_label == "DNABERT-2":
+            max_len = 1024
+            dummy = "A" * max_len
+            inputs = self.tokenizer(
+                dummy,
+                return_tensors="pt",
+                padding=False,
+                truncation=True,
+                max_length=max_len,
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            with torch.inference_mode():
+                _ = self.model(**inputs)
+            self._clear_cache()
     
     def get_embedding(self, sequence):
         """
@@ -154,7 +169,11 @@ class SequenceEvolver:
         with torch.inference_mode():
             base_model = self.model.base_model if hasattr(self.model, "base_model") else self.model
             outputs = base_model(**inputs, return_dict=True)
-            hidden_states = outputs.last_hidden_state
+            if hasattr(outputs, "last_hidden_state"):
+                hidden_states = outputs.last_hidden_state
+            else:
+                # Some models ignore return_dict=True and return a tuple.
+                hidden_states = outputs[0]
             attention_mask = inputs['attention_mask'].unsqueeze(-1)
             
             sum_embeddings = torch.sum(hidden_states * attention_mask, dim=1)
