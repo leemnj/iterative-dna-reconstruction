@@ -801,19 +801,72 @@ def plot_final_similarity_raincloud_by_gene_type(
         print("⚠️ No gene type metadata provided.")
         return None
     
+    records = []
+    for gene_id, strategies_map in embeddings_dict.items():
+        gene_type = gene_type_map.get(gene_id)
+        if gene_type is None:
+            continue
+        for strategy_key, embs in strategies_map.items():
+            if strategies and strategy_key not in strategies:
+                continue
+            sims = cosine_series_from_embeddings(embs)
+            if not sims:
+                continue
+            records.append({
+                "Gene": gene_id,
+                "GeneType": gene_type,
+                "Strategy": strategy_key,
+                "FinalSimilarity": sims[-1],
+            })
+    df = pd.DataFrame(records)
+    if df.empty:
+        print("⚠️ No final similarity data available for raincloud plot.")
+        return None
+    
+    if palette is None:
+        palette = {"Coding": "#4C78A8", "Non-coding": "#F58518"}
     fig, ax = plt.subplots(figsize=(7.2, 4.6))
     order = ["Coding", "Non-coding"]
-    _plot_final_similarity_raincloud_on_ax(
-        ax,
-        embeddings_dict,
-        category_map=gene_type_map,
-        category_label="Gene Type",
+    sns.violinplot(
+        data=df,
+        x="GeneType",
+        y="FinalSimilarity",
         order=order,
-        strategies=strategies,
-        model_label=None,
-        palette=palette or {"Coding": "#4C78A8", "Non-coding": "#F58518"},
-        show_ylabel=True,
+        palette=palette,
+        inner=None,
+        cut=0,
+        linewidth=1.0,
+        ax=ax,
     )
+    sns.boxplot(
+        data=df,
+        x="GeneType",
+        y="FinalSimilarity",
+        order=order,
+        width=0.18,
+        showcaps=False,
+        boxprops={"facecolor": "white", "alpha": 0.9},
+        showfliers=False,
+        whiskerprops={"linewidth": 1.0},
+        ax=ax,
+    )
+    sns.stripplot(
+        data=df,
+        x="GeneType",
+        y="FinalSimilarity",
+        hue="GeneType",
+        order=order,
+        size=4,
+        jitter=0.25,
+        alpha=0.6,
+        palette=palette,
+        ax=ax,
+        legend=False,
+    )
+    
+    ax.set_xlabel("Gene Type")
+    ax.set_ylabel("Final Cosine Similarity")
+    ax.set_ylim(0, 1)
     title = "Final Similarity by Gene Type"
     if model_label:
         title = f"{model_label} - {title}"
@@ -826,31 +879,25 @@ def plot_final_similarity_raincloud_by_gene_type(
     return fig
 
 
-def _plot_final_similarity_raincloud_on_ax(
+def _plot_final_similarity_raincloud_by_gene_type_on_ax(
     ax,
     embeddings_dict,
-    category_map,
-    category_label,
-    order,
+    gene_type_map,
     strategies=None,
     model_label=None,
     palette=None,
+    swap_axes=False,
     show_ylabel=True,
-    gene_type_map=None,
-    type_filter=None,
 ):
-    if not category_map:
+    if not gene_type_map:
         ax.set_axis_off()
         return
 
     records = []
     for gene_id, strategies_map in embeddings_dict.items():
-        category_value = category_map.get(gene_id)
-        if category_value is None:
+        gene_type = gene_type_map.get(gene_id)
+        if gene_type is None:
             continue
-        if type_filter and gene_type_map is not None:
-            if gene_type_map.get(gene_id) != type_filter:
-                continue
         for strategy_key, embs in strategies_map.items():
             if strategies and strategy_key not in strategies:
                 continue
@@ -859,7 +906,7 @@ def _plot_final_similarity_raincloud_on_ax(
                 continue
             records.append({
                 "Gene": gene_id,
-                "Category": category_value,
+                "GeneType": gene_type,
                 "Strategy": strategy_key,
                 "FinalSimilarity": sims[-1],
             })
@@ -869,52 +916,94 @@ def _plot_final_similarity_raincloud_on_ax(
         return
 
     if palette is None:
-        palette = {}
+        palette = {"Coding": "#4C78A8", "Non-coding": "#F58518"}
+    order = ["Coding", "Non-coding"]
 
-    before = len(ax.collections)
-    sns.violinplot(
-        data=df,
-        x="FinalSimilarity",
-        y="Category",
-        hue="Category",
-        order=order,
-        palette=palette,
-        inner=None,
-        cut=0,
-        linewidth=1.0,
-        ax=ax,
-        legend=False,
-    )
-    for artist in ax.collections[before:]:
-        artist.set_alpha(0.4)
-    sns.boxplot(
-        data=df,
-        x="FinalSimilarity",
-        y="Category",
-        order=order,
-        width=0.18,
-        showcaps=False,
-        boxprops={"facecolor": "white", "alpha": 0.9},
-        showfliers=False,
-        whiskerprops={"linewidth": 1.0},
-        ax=ax,
-    )
-    sns.stripplot(
-        data=df,
-        x="FinalSimilarity",
-        y="Category",
-        hue="Category",
-        order=order,
-        size=4,
-        jitter=0.25,
-        alpha=0.6,
-        palette=palette,
-        ax=ax,
-        legend=False,
-    )
-    ax.set_xlabel("Final Cosine Similarity")
-    ax.set_xlim(0.6, 1.0)
-    ax.set_ylabel(category_label if show_ylabel else "")
+    if swap_axes:
+        sns.violinplot(
+            data=df,
+            x="FinalSimilarity",
+            y="GeneType",
+            hue="GeneType",
+            order=order,
+            palette=palette,
+            inner=None,
+            cut=0,
+            linewidth=1.0,
+            ax=ax,
+            legend=False,
+            alpha = 0.4
+        )
+        sns.boxplot(
+            data=df,
+            x="FinalSimilarity",
+            y="GeneType",
+            order=order,
+            width=0.18,
+            showcaps=False,
+            boxprops={"facecolor": "white", "alpha": 0.9},
+            showfliers=False,
+            whiskerprops={"linewidth": 1.0},
+            ax=ax,
+        )
+        sns.stripplot(
+            data=df,
+            x="FinalSimilarity",
+            y="GeneType",
+            hue="GeneType",
+            order=order,
+            size=4,
+            jitter=0.25,
+            alpha=0.6,
+            palette=palette,
+            ax=ax,
+            legend=False,
+        )
+        ax.set_xlabel("Final Cosine Similarity")
+        ax.set_xlim(0.6, 1.0)
+        ax.set_ylabel("Gene Type" if show_ylabel else "")
+    else:
+        sns.violinplot(
+            data=df,
+            x="GeneType",
+            y="FinalSimilarity",
+            hue="GeneType",
+            order=order,
+            palette=palette,
+            inner=None,
+            cut=0,
+            linewidth=1.0,
+            ax=ax,
+            legend=False,
+        )
+        sns.boxplot(
+            data=df,
+            x="GeneType",
+            y="FinalSimilarity",
+            order=order,
+            width=0.18,
+            showcaps=False,
+            boxprops={"facecolor": "white", "alpha": 0.9},
+            showfliers=False,
+            whiskerprops={"linewidth": 1.0},
+            ax=ax,
+        )
+        sns.stripplot(
+            data=df,
+            x="GeneType",
+            y="FinalSimilarity",
+            hue="GeneType",
+            order=order,
+            size=4,
+            jitter=0.25,
+            alpha=0.6,
+            palette=palette,
+            ax=ax,
+            legend=False,
+        )
+        ax.set_xlabel("Gene Type")
+        ax.set_ylabel("Final Cosine Similarity" if show_ylabel else "")
+        ax.set_ylim(0, 1)
 
     if model_label:
         ax.set_title(model_label)
@@ -950,22 +1039,77 @@ def plot_final_similarity_raincloud_by_gene_status(
     if not gene_status_map:
         print("⚠️ No gene status metadata provided.")
         return None
-
+    
+    records = []
+    for gene_id, strategies_map in embeddings_dict.items():
+        status = gene_status_map.get(gene_id)
+        if status is None:
+            continue
+        if type_filter and gene_type_map is not None:
+            if gene_type_map.get(gene_id) != type_filter:
+                continue
+        for strategy_key, embs in strategies_map.items():
+            if strategies and strategy_key not in strategies:
+                continue
+            sims = cosine_series_from_embeddings(embs)
+            if not sims:
+                continue
+            records.append({
+                "Gene": gene_id,
+                "Status": status,
+                "Strategy": strategy_key,
+                "FinalSimilarity": sims[-1],
+            })
+    df = pd.DataFrame(records)
+    if df.empty:
+        print("⚠️ No final similarity data available for raincloud plot.")
+        return None
+    
+    if palette is None:
+        palette = {"Real": "#54A24B", "Pseudogene": "#E45756"}
     fig, ax = plt.subplots(figsize=(7.2, 4.6))
     order = ["Real", "Pseudogene"]
-    _plot_final_similarity_raincloud_on_ax(
-        ax,
-        embeddings_dict,
-        category_map=gene_status_map,
-        category_label="Gene Status",
+    sns.violinplot(
+        data=df,
+        x="Status",
+        y="FinalSimilarity",
         order=order,
-        strategies=strategies,
-        model_label=None,
-        palette=palette or {"Real": "#54A24B", "Pseudogene": "#E45756"},
-        show_ylabel=True,
-        gene_type_map=gene_type_map,
-        type_filter=type_filter,
+        palette=palette,
+        inner=None,
+        cut=0,
+        linewidth=1.0,
+        alpha=0.4,
+        ax=ax,
     )
+    sns.boxplot(
+        data=df,
+        x="Status",
+        y="FinalSimilarity",
+        order=order,
+        width=0.18,
+        showcaps=False,
+        boxprops={"facecolor": "white", "alpha": 0.9},
+        showfliers=False,
+        whiskerprops={"linewidth": 1.0},
+        ax=ax,
+    )
+    sns.stripplot(
+        data=df,
+        x="Status",
+        y="FinalSimilarity",
+        hue="Status",
+        order=order,
+        size=4,
+        jitter=0.25,
+        alpha=0.6,
+        palette=palette,
+        ax=ax,
+        legend=False,
+    )
+    
+    ax.set_xlabel("Gene Status")
+    ax.set_ylabel("Final Cosine Similarity")
+    ax.set_ylim(0, 1)
     title = "Final Similarity by Gene Status"
     if type_filter:
         title = f"{title} ({type_filter})"
@@ -989,21 +1133,130 @@ def _plot_final_similarity_raincloud_by_gene_status_on_ax(
     strategies=None,
     model_label=None,
     palette=None,
+    swap_axes=False,
     show_ylabel=True,
 ):
-    _plot_final_similarity_raincloud_on_ax(
-        ax,
-        embeddings_dict,
-        category_map=gene_status_map,
-        category_label="Gene Status",
-        order=["Real", "Pseudogene"],
-        strategies=strategies,
-        model_label=model_label,
-        palette=palette or {"Real": "#54A24B", "Pseudogene": "#E45756"},
-        show_ylabel=show_ylabel,
-        gene_type_map=gene_type_map,
-        type_filter=type_filter,
-    )
+    if not gene_status_map:
+        ax.set_axis_off()
+        return
+
+    records = []
+    for gene_id, strategies_map in embeddings_dict.items():
+        status = gene_status_map.get(gene_id)
+        if status is None:
+            continue
+        if type_filter and gene_type_map is not None:
+            if gene_type_map.get(gene_id) != type_filter:
+                continue
+        for strategy_key, embs in strategies_map.items():
+            if strategies and strategy_key not in strategies:
+                continue
+            sims = cosine_series_from_embeddings(embs)
+            if not sims:
+                continue
+            records.append({
+                "Gene": gene_id,
+                "Status": status,
+                "Strategy": strategy_key,
+                "FinalSimilarity": sims[-1],
+            })
+    df = pd.DataFrame(records)
+    if df.empty:
+        ax.set_axis_off()
+        return
+
+    if palette is None:
+        palette = {"Real": "#54A24B", "Pseudogene": "#E45756"}
+    order = ["Real", "Pseudogene"]
+
+    if swap_axes:
+        sns.violinplot(
+            data=df,
+            x="FinalSimilarity",
+            y="Status",
+            hue="Status",
+            order=order,
+            palette=palette,
+            inner=None,
+            cut=0,
+            linewidth=1.0,
+            ax=ax,
+            alpha=0.4,
+            legend=False,
+        )
+        sns.boxplot(
+            data=df,
+            x="FinalSimilarity",
+            y="Status",
+            order=order,
+            width=0.18,
+            showcaps=False,
+            boxprops={"facecolor": "white", "alpha": 0.9},
+            showfliers=False,
+            whiskerprops={"linewidth": 1.0},
+            ax=ax,
+        )
+        sns.stripplot(
+            data=df,
+            x="FinalSimilarity",
+            y="Status",
+            hue="Status",
+            order=order,
+            size=4,
+            jitter=0.25,
+            alpha=0.6,
+            palette=palette,
+            ax=ax,
+            legend=False,
+        )
+        ax.set_xlabel("Final Cosine Similarity")
+        ax.set_xlim(0.6, 1.0)
+        ax.set_ylabel("Gene Status" if show_ylabel else "")
+    else:
+        sns.violinplot(
+            data=df,
+            x="Status",
+            y="FinalSimilarity",
+            hue="Status",
+            order=order,
+            palette=palette,
+            inner=None,
+            cut=0,
+            linewidth=1.0,
+            ax=ax,
+            legend=False,
+        )
+        sns.boxplot(
+            data=df,
+            x="Status",
+            y="FinalSimilarity",
+            order=order,
+            width=0.18,
+            showcaps=False,
+            boxprops={"facecolor": "white", "alpha": 0.9},
+            showfliers=False,
+            whiskerprops={"linewidth": 1.0},
+            ax=ax,
+        )
+        sns.stripplot(
+            data=df,
+            x="Status",
+            y="FinalSimilarity",
+            hue="Status",
+            order=order,
+            size=4,
+            jitter=0.25,
+            alpha=0.6,
+            palette=palette,
+            ax=ax,
+            legend=False,
+        )
+        ax.set_xlabel("Gene Status")
+        ax.set_ylabel("Final Cosine Similarity" if show_ylabel else "")
+        ax.set_ylim(0, 1)
+
+    if model_label:
+        ax.set_title(model_label)
 
 
 def plot_pca_trajectory_gene_pairs(

@@ -33,6 +33,38 @@ def get_device():
     return device
 
 
+def resolve_torch_dtype(device, torch_dtype):
+    """
+    Resolve desired torch dtype based on device and preference.
+    
+    Args:
+        device (str): 'cuda', 'mps', or 'cpu'
+        torch_dtype (str or torch.dtype): Desired dtype or "auto"
+    
+    Returns:
+        torch.dtype: Resolved dtype
+    """
+    if isinstance(torch_dtype, torch.dtype):
+        return torch_dtype
+    if torch_dtype is None or torch_dtype == "auto":
+        if device == "cuda":
+            return torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+        if device == "mps":
+            return torch.float16
+        return torch.float32
+    dtype_map = {
+        "fp16": torch.float16,
+        "float16": torch.float16,
+        "bf16": torch.bfloat16,
+        "bfloat16": torch.bfloat16,
+        "fp32": torch.float32,
+        "float32": torch.float32,
+    }
+    if torch_dtype in dtype_map:
+        return dtype_map[torch_dtype]
+    raise ValueError(f"Unsupported torch_dtype: {torch_dtype}")
+
+
 def force_patch_triton_config(model_path):
     """
     Patch DNABERT-2 Triton configuration for MPS compatibility.
@@ -68,7 +100,7 @@ class SequenceEvolver:
     Supports DNABERT-2, Nucleotide Transformer, and other HuggingFace models.
     """
     
-    def __init__(self, model_path, model_label, device):
+    def __init__(self, model_path, model_label, device, torch_dtype="auto"):
         """
         Initialize the SequenceEvolver with a pretrained model.
         
@@ -76,13 +108,27 @@ class SequenceEvolver:
             model_path (str): Path to the pretrained model or HuggingFace model ID
             model_label (str): Label for the model (e.g., "DNABERT-2")
             device (str): Device to load the model on ('cuda', 'mps', 'cpu')
+            torch_dtype (str or torch.dtype): Desired torch dtype for model weights
         """
         self.label = model_label
         self.device = device
         print(f"[{model_label}] Loading model...")
         
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
-        self.model = AutoModelForMaskedLM.from_pretrained(model_path, trust_remote_code=True).to(device)
+        resolved_dtype = resolve_torch_dtype(device, torch_dtype)
+        try:
+            # Prefer new HF argument name to avoid deprecation warnings.
+            self.model = AutoModelForMaskedLM.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                dtype=resolved_dtype,
+            ).to(device)
+        except TypeError:
+            self.model = AutoModelForMaskedLM.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                torch_dtype=resolved_dtype,
+            ).to(device)
         self.model.eval()
         print(f"[{model_label}] Model loaded successfully.")
     
@@ -105,9 +151,10 @@ class SequenceEvolver:
         )
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         
-        with torch.no_grad():
-            outputs = self.model(**inputs, output_hidden_states=True)
-            hidden_states = outputs.hidden_states[-1]
+        with torch.inference_mode():
+            base_model = self.model.base_model if hasattr(self.model, "base_model") else self.model
+            outputs = base_model(**inputs, return_dict=True)
+            hidden_states = outputs.last_hidden_state
             attention_mask = inputs['attention_mask'].unsqueeze(-1)
             
             sum_embeddings = torch.sum(hidden_states * attention_mask, dim=1)
@@ -167,54 +214,60 @@ class SequenceEvolver:
         Returns:
             str: Evolved sequence
         """
-        inputs = self.tokenizer(
+        max_length = 1024
+        num_special_tokens = self.tokenizer.num_special_tokens_to_add(pair=False)
+        window_size = max(1, max_length - num_special_tokens)
+        stride = max(1, window_size // 2)
+
+        raw_ids = self.tokenizer(
             current_sequence,
-            return_tensors="pt",
-            truncation=True,
-            max_length=1024
-        )
-        input_ids = inputs["input_ids"].to(self.device)
-        
-        # Get special tokens to exclude from masking
-        special_tokens = [
-            self.tokenizer.pad_token_id,
-            self.tokenizer.cls_token_id,
-            self.tokenizer.sep_token_id,
-            self.tokenizer.eos_token_id,
-            self.tokenizer.bos_token_id,
-        ]
-        special_tokens = [x for x in special_tokens if x is not None]
-        
-        # Select random positions to mask
-        seq_len = input_ids.shape[1]
-        candidate_indices = [
-            i for i in range(seq_len)
-            if input_ids[0, i].item() not in special_tokens
-        ]
-        num_mask = max(1, int(len(candidate_indices) * mask_ratio))
-        mask_indices = np.random.choice(candidate_indices, num_mask, replace=False)
-        
-        # Mask selected positions
-        input_ids[0, mask_indices] = self.tokenizer.mask_token_id
-        
-        # Predict masked tokens
-        with torch.no_grad():
-            outputs = self.model(input_ids)
-            logits = outputs.logits
-        
-        mask_logits = logits[0, mask_indices, :]
-        predicted_tokens = self.decode(mask_logits, strategy, temperature, top_k)
-        
-        # Replace masked tokens with predictions
-        final_ids = input_ids.clone()
-        final_ids[0, mask_indices] = predicted_tokens
-        
-        restored_sequence = self.tokenizer.decode(final_ids[0], skip_special_tokens=True)
-        
-        # Memory cleanup
-        del inputs, input_ids, outputs, logits, mask_logits, predicted_tokens, final_ids
+            add_special_tokens=False,
+            truncation=False
+        )["input_ids"]
+        raw_ids = torch.tensor(raw_ids, device=self.device)
+
+        for start in range(0, raw_ids.numel(), stride):
+            end = min(start + window_size, raw_ids.numel())
+            window_raw = raw_ids[start:end].tolist()
+            window_ids = self.tokenizer.build_inputs_with_special_tokens(window_raw)
+            input_ids = torch.tensor([window_ids], device=self.device)
+
+            special_mask = self.tokenizer.get_special_tokens_mask(
+                window_ids, already_has_special_tokens=True
+            )
+            candidate_indices = [i for i, m in enumerate(special_mask) if m == 0]
+            if not candidate_indices:
+                continue
+
+            num_mask = max(1, int(len(candidate_indices) * mask_ratio))
+            mask_indices = np.random.choice(candidate_indices, num_mask, replace=False)
+            input_ids[0, mask_indices] = self.tokenizer.mask_token_id
+
+            with torch.no_grad():
+                outputs = self.model(input_ids)
+                logits = outputs.logits
+
+            mask_logits = logits[0, mask_indices, :]
+            predicted_tokens = self.decode(mask_logits, strategy, temperature, top_k)
+
+            # Map window token positions back to raw indices.
+            window_raw_positions = [i for i, m in enumerate(special_mask) if m == 0]
+            local_to_raw = {
+                pos: start + idx for idx, pos in enumerate(window_raw_positions)
+            }
+            for local_pos, predicted_id in zip(mask_indices, predicted_tokens):
+                raw_ids[local_to_raw[int(local_pos)]] = predicted_id
+
+            del input_ids, outputs, logits, mask_logits, predicted_tokens
+            self._clear_cache()
+
+            if end == raw_ids.numel():
+                break
+
+        restored_sequence = self.tokenizer.decode(raw_ids, skip_special_tokens=True)
+        del raw_ids
         self._clear_cache()
-        
+
         return restored_sequence.replace(" ", "")
     
     def run(self, sequence, steps, mask_ratio, strategy, temperature, top_k, 
@@ -254,7 +307,52 @@ class SequenceEvolver:
         return sequence_history
 
 
-def load_models(device, model_configs=None):
+def load_model(device, model_label, model_path, torch_dtype="auto"):
+    """
+    Load a single pretrained model.
+    
+    Args:
+        device (str): Device to load model on
+        model_label (str): Model label
+        model_path (str): Model path/ID
+        torch_dtype (str or torch.dtype): Desired torch dtype
+    
+    Returns:
+        SequenceEvolver: Loaded model instance
+    """
+    # Special handling for DNABERT-2
+    if model_label == "DNABERT-2":
+        print(f"📥 Downloading {model_label}...")
+        local_path = snapshot_download(repo_id=model_path)
+        force_patch_triton_config(local_path)
+        model_path = local_path
+    
+    return SequenceEvolver(model_path, model_label, device, torch_dtype=torch_dtype)
+
+
+def iter_models(device, model_configs, torch_dtype="auto"):
+    """
+    Iterate over model configs and load one model at a time.
+    
+    Args:
+        device (str): Device to load models on
+        model_configs (dict): {label: model_path}
+        torch_dtype (str or torch.dtype): Desired torch dtype
+    
+    Yields:
+        tuple: (model_label, SequenceEvolver)
+    """
+    for label, model_path in model_configs.items():
+        try:
+            model = load_model(device, label, model_path, torch_dtype=torch_dtype)
+            print(f"✅ {label} loaded successfully.")
+            yield label, model
+        except Exception as e:
+            print(f"❌ {label} load failed: {e}")
+            continue
+
+
+def load_models(device, model_configs=None, torch_dtype="auto"):
     """
     Load pretrained models.
     
@@ -262,6 +360,7 @@ def load_models(device, model_configs=None):
         device (str): Device to load models on
         model_configs (dict): Model configurations. If None, uses default configs.
                             Keys are model labels, values are model paths/IDs.
+        torch_dtype (str or torch.dtype): Desired torch dtype
         
     Returns:
         dict: Dictionary of model instances {label: SequenceEvolver}
@@ -277,14 +376,7 @@ def load_models(device, model_configs=None):
     
     for label, model_path in model_configs.items():
         try:
-            # Special handling for DNABERT-2
-            if label == "DNABERT-2":
-                print(f"📥 Downloading {label}...")
-                local_path = snapshot_download(repo_id=model_path)
-                force_patch_triton_config(local_path)
-                model_path = local_path
-            
-            models[label] = SequenceEvolver(model_path, label, device)
+            models[label] = load_model(device, label, model_path, torch_dtype=torch_dtype)
             print(f"✅ {label} loaded successfully.")
         except Exception as e:
             print(f"❌ {label} load failed: {e}")

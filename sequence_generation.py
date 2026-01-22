@@ -25,13 +25,9 @@ DEFAULT_GENES = {
     # --- 1. Original List (기존 목록) ---
     "H4C1":    {"id": "NM_003538",    "type": "Coding",     "status": "Real",       "sequence": None},
     "TP53":    {"id": "NM_000546",    "type": "Coding",     "status": "Real",       "sequence": None},
-    "GAPDH":   {"id": "NM_002046",    "type": "Coding",     "status": "Real",       "sequence": None},
-    "GAPDHP1": {"id": "NG_001123",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
-    "NORAD":   {"id": "NR_027451",    "type": "Non-coding", "status": "Real",       "sequence": None},
-    "STAT3":   {"id": "NM_139276",    "type": "Coding",     "status": "Real",       "sequence": None},
 
     # --- 2. Length/Exon Comparison (길이 및 엑손 개수 극단값 비교) ---
-    "TTN":     {"id": "NM_001267550", "type": "Coding",     "status": "Real",       "sequence": None},  # Longest
+    # "TTN":     {"id": "NM_001267550", "type": "Coding",     "status": "Real",       "sequence": None},  # Longest
     "HBB":     {"id": "NM_000518",    "type": "Coding",     "status": "Real",       "sequence": None},  # Short
 
     # --- 3. Coding vs Non-coding: Length Matched Pairs (길이 통제 비교) ---
@@ -41,14 +37,23 @@ DEFAULT_GENES = {
     # Pair B (~3.7kb)
     "VEGFA":   {"id": "NM_003376",    "type": "Coding",     "status": "Real",       "sequence": None},
     "NEAT1":   {"id": "NR_003513",    "type": "Non-coding", "status": "Real",       "sequence": None},
+    
+    "NORAD":   {"id": "NR_027451",    "type": "Non-coding", "status": "Real",       "sequence": None},
+    "STAT3":   {"id": "NM_139276",    "type": "Coding",     "status": "Real",       "sequence": None},
 
     # --- 4. Real vs Pseudogene Comparison (서열 유사도 및 길이 통제) ---
     # Sequence Similarity Focus (서열 패턴 비교용)
     "PTEN":    {"id": "NM_000314",    "type": "Coding",     "status": "Real",       "sequence": None},
     "PTENP1":  {"id": "NR_023917",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
     # Length Control Focus (길이 변인 통제용)
+    "GAPDH":   {"id": "NM_002046",    "type": "Coding",     "status": "Real",       "sequence": None},
+    "GAPDHP1": {"id": "NG_001123",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
     "TPI1":    {"id": "NM_000365",    "type": "Coding",     "status": "Real",       "sequence": None},
     "TPI1P1":  {"id": "NG_008262.2",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
+    "GBA":     {"id": "NM_000157",    "type": "Coding",     "status": "Real",       "sequence": None},
+    "GBAP1":   {"id": "NR_002777",    "type": "Non-coding", "status": "Pseudogene",     "sequence": None},
+    "STRC":    {"id": "NM_153700",    "type": "Coding",     "status": "Real",       "sequence": None},
+    "STRCP1":  {"id": "NR_146078",    "type": "Non-coding", "status": "Pseudogene",     "sequence": None},
 }
 
 DEFAULT_GENES_TO_SEARCH = []
@@ -213,6 +218,7 @@ def generate_and_embed_sequences(
     save_interval=5,
     output_dir=None,
     store_in_memory=False,
+    compute_embeddings=False,
     save_each_strategy=True,
     device="cuda",
     use_notebook_tqdm=True
@@ -230,6 +236,7 @@ def generate_and_embed_sequences(
         save_interval (int): Save interval when save_all_sequences=False
         output_dir (Path): Output directory for results
         store_in_memory (bool): Whether to keep all data in memory
+        compute_embeddings (bool): Whether to compute and save embeddings
         save_each_strategy (bool): Whether to save per-strategy files
         device (str): Device for memory cleanup
         use_notebook_tqdm (bool): Use notebook tqdm (set False for terminal scripts)
@@ -287,35 +294,39 @@ def generate_and_embed_sequences(
                         save_interval=save_interval
                     )
                     
-                    # Extract embeddings
-                    embeddings = []
-                    for idx, seq in enumerate(generated_sequences):
-                        embedding = model_instance.get_embedding(seq)
-                        embeddings.append(embedding)
-                        
-                        # Periodic memory cleanup
-                        if (idx + 1) % 10 == 0:
-                            gc.collect()
-                            if device == "cuda":
-                                import torch
-                                torch.cuda.empty_cache()
-                            elif device == "mps":
-                                import torch
-                                torch.mps.empty_cache()
+                    # Extract embeddings (optional)
+                    embeddings = None
+                    if compute_embeddings:
+                        embeddings = []
+                        for idx, seq in enumerate(generated_sequences):
+                            embedding = model_instance.get_embedding(seq)
+                            embeddings.append(embedding)
+                            
+                            # Periodic memory cleanup
+                            if (idx + 1) % 10 == 0:
+                                gc.collect()
+                                if device == "cuda":
+                                    import torch
+                                    torch.cuda.empty_cache()
+                                elif device == "mps":
+                                    import torch
+                                    torch.mps.empty_cache()
                     
                     # Store in memory if requested
                     if store_in_memory:
                         all_generated_sequences[gene_name][model_label][strategy_key] = generated_sequences
-                        all_gene_embeddings[gene_name][model_label][strategy_key] = embeddings
+                        if compute_embeddings:
+                            all_gene_embeddings[gene_name][model_label][strategy_key] = embeddings
                     
                     # Save to disk
                     if save_each_strategy:
                         save_strategy_sequences(
                             gene_name, model_label, strategy_key, generated_sequences, output_dir
                         )
-                        save_strategy_embeddings(
-                            gene_name, model_label, strategy_key, embeddings, output_dir
-                        )
+                        if compute_embeddings:
+                            save_strategy_embeddings(
+                                gene_name, model_label, strategy_key, embeddings, output_dir
+                            )
                     
                     # Memory cleanup
                     del generated_sequences, embeddings
