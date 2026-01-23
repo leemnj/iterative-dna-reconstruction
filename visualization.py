@@ -879,7 +879,7 @@ def plot_final_similarity_raincloud_by_gene_type(
     return fig
 
 
-def _plot_final_similarity_raincloud_by_gene_type_on_ax(
+def _plot_final_similarity_raincloud_by_gene_type(
     ax,
     embeddings_dict,
     gene_type_map,

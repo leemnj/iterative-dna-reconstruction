@@ -131,6 +131,22 @@ class SequenceEvolver:
             ).to(device)
         self.model.eval()
         print(f"[{model_label}] Model loaded successfully.")
+
+        if model_label == "DNABERT-2":
+            # Warm up alibi cache to reduce repeated resize warnings.
+            max_len = 1024
+            dummy_seq = "A" * max_len
+            inputs = self.tokenizer(
+                dummy_seq,
+                return_tensors="pt",
+                padding=False,
+                truncation=True,
+                max_length=max_len,
+            )
+            inputs = {k: v.to(self.device) for k, v in inputs.items()}
+            with torch.inference_mode():
+                _ = self.model(**inputs)
+            self._clear_cache()
         # DNABERT-2: alibi 캐시를 1024로 한번에 키우기
         if model_label == "DNABERT-2":
             max_len = 1024
