@@ -21,39 +21,52 @@ from io_utils import (
 
 
 # Gene collection configurations
-DEFAULT_GENES = {
-    # --- 1. Original List (기존 목록) ---
-    "H4C1":    {"id": "NM_003538",    "type": "Coding",     "status": "Real",       "sequence": None},
-    "TP53":    {"id": "NM_000546",    "type": "Coding",     "status": "Real",       "sequence": None},
+# DEFAULT_GENES = {
+#     # --- 1. Original List (기존 목록) ---
+#     "H4C1":    {"id": "NM_003538",    "type": "Coding",     "status": "Real",       "sequence": None},
+#     "TP53":    {"id": "NM_000546",    "type": "Coding",     "status": "Real",       "sequence": None},
 
-    # --- 2. Length/Exon Comparison (길이 및 엑손 개수 극단값 비교) ---
-    # "TTN":     {"id": "NM_001267550", "type": "Coding",     "status": "Real",       "sequence": None},  # Longest
-    "HBB":     {"id": "NM_000518",    "type": "Coding",     "status": "Real",       "sequence": None},  # Short
+#     # --- 2. Length/Exon Comparison (길이 및 엑손 개수 극단값 비교) ---
+#     # "TTN":     {"id": "NM_001267550", "type": "Coding",     "status": "Real",       "sequence": None},  # Longest
+#     "HBB":     {"id": "NM_000518",    "type": "Coding",     "status": "Real",       "sequence": None},  # Short
 
-    # --- 3. Coding vs Non-coding: Length Matched Pairs (길이 통제 비교) ---
-    # Pair A (~2.3kb)
-    "HOXC11":  {"id": "NM_014212",    "type": "Coding",     "status": "Real",       "sequence": None},
-    "HOTAIR":  {"id": "NR_003716",    "type": "Non-coding", "status": "Real",       "sequence": None},
-    # Pair B (~3.7kb)
-    "VEGFA":   {"id": "NM_003376",    "type": "Coding",     "status": "Real",       "sequence": None},
-    "NEAT1":   {"id": "NR_003513",    "type": "Non-coding", "status": "Real",       "sequence": None},
+#     # --- 3. Coding vs Non-coding: Length Matched Pairs (길이 통제 비교) ---
+#     # Pair A (~2.3kb)
+#     "HOXC11":  {"id": "NM_014212",    "type": "Coding",     "status": "Real",       "sequence": None},
+#     "HOTAIR":  {"id": "NR_003716",    "type": "Non-coding", "status": "Real",       "sequence": None},
+#     # Pair B (~3.7kb)
+#     "VEGFA":   {"id": "NM_003376",    "type": "Coding",     "status": "Real",       "sequence": None},
+#     "NEAT1":   {"id": "NR_003513",    "type": "Non-coding", "status": "Real",       "sequence": None},
     
-    "NORAD":   {"id": "NR_027451",    "type": "Non-coding", "status": "Real",       "sequence": None},
-    "STAT3":   {"id": "NM_139276",    "type": "Coding",     "status": "Real",       "sequence": None},
+#     "NORAD":   {"id": "NR_027451",    "type": "Non-coding", "status": "Real",       "sequence": None},
+#     "STAT3":   {"id": "NM_139276",    "type": "Coding",     "status": "Real",       "sequence": None},
 
-    # --- 4. Real vs Pseudogene Comparison (서열 유사도 및 길이 통제) ---
-    # Sequence Similarity Focus (서열 패턴 비교용)
-    "PTEN":    {"id": "NM_000314",    "type": "Coding",     "status": "Real",       "sequence": None},
-    "PTENP1":  {"id": "NR_023917",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
-    # Length Control Focus (길이 변인 통제용)
-    "GAPDH":   {"id": "NM_002046",    "type": "Coding",     "status": "Real",       "sequence": None},
-    "GAPDHP1": {"id": "NG_001123",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
-    "TPI1":    {"id": "NM_000365",    "type": "Coding",     "status": "Real",       "sequence": None},
-    "TPI1P1":  {"id": "NG_008262.2",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
-    "GBA":     {"id": "NM_000157",    "type": "Coding",     "status": "Real",       "sequence": None},
-    "GBAP1":   {"id": "NR_002777",    "type": "Non-coding", "status": "Pseudogene",     "sequence": None},
-    "STRC":    {"id": "NM_153700",    "type": "Coding",     "status": "Real",       "sequence": None},
-    "STRCP1":  {"id": "NR_146078",    "type": "Non-coding", "status": "Pseudogene",     "sequence": None},
+#     # --- 4. Real vs Pseudogene Comparison (서열 유사도 및 길이 통제) ---
+#     # Sequence Similarity Focus (서열 패턴 비교용)
+#     "PTEN":    {"id": "NM_000314",    "type": "Coding",     "status": "Real",       "sequence": None},
+#     "PTENP1":  {"id": "NR_023917",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
+#     # Length Control Focus (길이 변인 통제용)
+#     "GAPDH":   {"id": "NM_002046",    "type": "Coding",     "status": "Real",       "sequence": None},
+#     "GAPDHP1": {"id": "NG_001123",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
+#     "TPI1":    {"id": "NM_000365",    "type": "Coding",     "status": "Real",       "sequence": None},
+#     "TPI1P1":  {"id": "NG_008262.2",    "type": "Non-coding", "status": "Pseudogene", "sequence": None},
+#     "GBA":     {"id": "NM_000157",    "type": "Coding",     "status": "Real",       "sequence": None},
+#     "GBAP1":   {"id": "NR_002777",    "type": "Non-coding", "status": "Pseudogene",     "sequence": None},
+#     "STRC":    {"id": "NM_153700",    "type": "Coding",     "status": "Real",       "sequence": None},
+#     "STRCP1":  {"id": "NR_146078",    "type": "Non-coding", "status": "Pseudogene",     "sequence": None},
+# }
+
+DEFAULT_GENES = {
+    "PTEN":    {"id": "ENSG00000171862", "type": "Coding",    "status": "Real",   "sequence": None},
+    "PTENP1":  {"id": "ENSG00000237938", "type": "Noncoding", "status": "Pseudo", "sequence": None},
+    "GAPDH":   {"id": "ENSG00000111640", "type": "Coding",    "status": "Real",   "sequence": None},
+    "GAPDHP1": {"id": "ENSG00000228232", "type": "Noncoding", "status": "Pseudo", "sequence": None},
+    "HBB":     {"id": "ENSG00000244734", "type": "Coding",    "status": "Real",   "sequence": None},
+    "H19":     {"id": "ENSG00000130600", "type": "Noncoding", "status": "Real",   "sequence": None},
+    "RPS29":   {"id": "ENSG00000145592", "type": "Coding",    "status": "Real",   "sequence": None},
+    "GAS5":    {"id": "ENSG00000234741", "type": "Noncoding", "status": "Real",   "sequence": None},
+    "TP53":    {"id": "ENSG00000141510", "type": "Coding",    "status": "Real",   "sequence": None},
+    "SNHG1":   {"id": "ENSG00000237699", "type": "Noncoding", "status": "Real",   "sequence": None}
 }
 
 DEFAULT_GENES_TO_SEARCH = []

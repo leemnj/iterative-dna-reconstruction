@@ -11,7 +11,7 @@ from matplotlib.ticker import MaxNLocator
 from pathlib import Path
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.decomposition import PCA
-from collections import Counter
+from collections import Counter, defaultdict
 from io_utils import load_sequences_compressed, load_from_parts
 from metrics_utils import (
     cosine_series_from_embeddings,
@@ -876,6 +876,176 @@ def plot_final_similarity_raincloud_by_gene_type(
     if save_path:
         fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
     
+    return fig
+
+
+def _aggregate_series_by_group(series_by_group):
+    """
+    Aggregate variable-length series into per-iteration mean/std per group.
+    """
+    aggregated = {}
+    for group, series_list in series_by_group.items():
+        if not series_list:
+            continue
+        max_len = max(len(series) for series in series_list)
+        means = []
+        stds = []
+        for idx in range(max_len):
+            values = [series[idx] for series in series_list if idx < len(series)]
+            if not values:
+                means.append(np.nan)
+                stds.append(np.nan)
+                continue
+            means.append(float(np.mean(values)))
+            stds.append(float(np.std(values)))
+        aggregated[group] = (means, stds)
+    return aggregated
+
+
+def plot_similarity_over_iterations_by_gene_type(
+    embeddings_dict,
+    gene_type_map,
+    strategies=None,
+    model_label=None,
+    font_family="Times New Roman",
+    dpi=300,
+    save_path=None,
+):
+    """
+    Plot mean cosine similarity over iterations for coding vs non-coding genes.
+    
+    Args:
+        embeddings_dict (dict): {gene_id: {strategy: [embeddings]}}
+        gene_type_map (dict): {gene_id: "Coding"/"Non-coding"}
+        strategies (list or None): Optional strategy filter
+        model_label (str or None): Optional title prefix
+        font_family (str): Preferred font family
+        dpi (int): Output DPI
+        save_path (str or Path or None): Save path for figure (optional)
+    """
+    if not gene_type_map:
+        print("⚠️ No gene type metadata provided.")
+        return None
+
+    series_by_group = defaultdict(list)
+    for gene_id, strategies_map in embeddings_dict.items():
+        group = gene_type_map.get(gene_id)
+        if group is None:
+            continue
+        for strategy_key, embs in strategies_map.items():
+            if strategies and strategy_key not in strategies:
+                continue
+            sims = cosine_series_from_embeddings(embs)
+            if sims:
+                series_by_group[group].append(sims)
+
+    aggregated = _aggregate_series_by_group(series_by_group)
+    if not aggregated:
+        print("⚠️ No similarity series available for gene type comparison.")
+        return None
+
+    fig, ax = plt.subplots(figsize=(7.4, 4.8))
+    palette = {"Coding": "#4C78A8", "Non-coding": "#F58518"}
+    for group, (means, stds) in aggregated.items():
+        color = palette.get(group, "#7F7F7F")
+        x_axis = np.arange(len(means))
+        ax.plot(x_axis, means, color=color, linewidth=2.0, label=group)
+        ax.fill_between(
+            x_axis,
+            np.array(means) - np.array(stds),
+            np.array(means) + np.array(stds),
+            color=color,
+            alpha=0.2,
+        )
+
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Cosine Similarity")
+    ax.set_ylim(0, 1)
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    title = "Similarity Over Iterations by Gene Type"
+    if model_label:
+        title = f"{model_label} - {title}"
+    ax.set_title(title)
+    ax.legend(title="Gene Type")
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+
+    return fig
+
+
+def plot_entropy_over_iterations_by_gene_type(
+    sequences_dict,
+    gene_type_map,
+    strategies=None,
+    model_label=None,
+    font_family="Times New Roman",
+    dpi=300,
+    save_path=None,
+):
+    """
+    Plot mean Shannon entropy over iterations for coding vs non-coding genes.
+    
+    Args:
+        sequences_dict (dict): {gene_id: {strategy: [sequences]}}
+        gene_type_map (dict): {gene_id: "Coding"/"Non-coding"}
+        strategies (list or None): Optional strategy filter
+        model_label (str or None): Optional title prefix
+        font_family (str): Preferred font family
+        dpi (int): Output DPI
+        save_path (str or Path or None): Save path for figure (optional)
+    """
+    if not gene_type_map:
+        print("⚠️ No gene type metadata provided.")
+        return None
+
+    series_by_group = defaultdict(list)
+    for gene_id, strategies_map in sequences_dict.items():
+        group = gene_type_map.get(gene_id)
+        if group is None:
+            continue
+        for strategy_key, seqs in strategies_map.items():
+            if strategies and strategy_key not in strategies:
+                continue
+            if not seqs:
+                continue
+            entropies = [calculate_shannon_entropy(seq) for seq in seqs]
+            if entropies:
+                series_by_group[group].append(entropies)
+
+    aggregated = _aggregate_series_by_group(series_by_group)
+    if not aggregated:
+        print("⚠️ No entropy series available for gene type comparison.")
+        return None
+
+    fig, ax = plt.subplots(figsize=(7.4, 4.8))
+    palette = {"Coding": "#4C78A8", "Non-coding": "#F58518"}
+    for group, (means, stds) in aggregated.items():
+        color = palette.get(group, "#7F7F7F")
+        x_axis = np.arange(len(means))
+        ax.plot(x_axis, means, color=color, linewidth=2.0, label=group)
+        ax.fill_between(
+            x_axis,
+            np.array(means) - np.array(stds),
+            np.array(means) + np.array(stds),
+            color=color,
+            alpha=0.2,
+        )
+
+    ax.set_xlabel("Iteration")
+    ax.set_ylabel("Shannon Entropy")
+    ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+    title = "Entropy Over Iterations by Gene Type"
+    if model_label:
+        title = f"{model_label} - {title}"
+    ax.set_title(title)
+    ax.legend(title="Gene Type")
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=dpi, bbox_inches="tight")
+
     return fig
 
 
@@ -2157,7 +2327,7 @@ def plot_cross_validation_heatmap(
     )
     ax.set_xlabel("Evaluator")
     ax.set_ylabel("Generator")
-    ax.set_title("Cross-Validation Semantic Similarity")
+    ax.set_title("Generator-Evaluator Cross-Model Evaluation")
     fig.tight_layout()
     
     if save_path:

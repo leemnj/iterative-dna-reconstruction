@@ -1,0 +1,11 @@
+pyproject.toml
+src/idr/__init__.py
+src/idr/embedding.py
+src/idr/io.py
+src/idr/preparation.py
+src/idr/sequence.py
+src/idr/utils.py
+src/idr.egg-info/PKG-INFO
+src/idr.egg-info/SOURCES.txt
+src/idr.egg-info/dependency_links.txt
+src/idr.egg-info/top_level.txt
