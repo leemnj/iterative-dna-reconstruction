@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: idr
+Version: 0.1.0
+Summary: Iterative DNA reconstruction utilities
+Requires-Python: >=3.9
