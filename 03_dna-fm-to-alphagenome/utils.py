@@ -153,8 +153,8 @@ def get_sequence(
     feature: str = "transcript",
     start: int | None = None,
     end: int | None = None,
-) -> tuple[str, dict]:
-    """Return normalized sequence and metadata for a gene symbol."""
+) -> str:
+    """Return normalized sequence for a gene symbol."""
     if gtf is None:
         gtf = load_gtf_feather()
 
@@ -190,15 +190,4 @@ def get_sequence(
     )
     seq_normalized = normalize_sequence(seq_raw)
 
-    metadata = {
-        "gene": gene,
-        "gene_id": gene_id,
-        "chrom": chrom,
-        "start": start,
-        "end": end,
-        "strand": strand,
-        "feature": feature,
-        "species": species,
-        "coord_system_version": coord_system_version,
-    }
-    return seq_normalized, metadata
+    return seq_normalized
