@@ -182,15 +182,49 @@ class SequenceEvolver:
         )["input_ids"]
         raw_ids = torch.tensor(raw_ids, device=self.device)
 
+        # Ensure length compatibility with downsample/upsample towers (2^N)
+        core = None
+        for candidate in (
+            getattr(self.model, "base_model", None),
+            getattr(self.model, "ntv3", None),
+            self.model,
+        ):
+            if candidate is None:
+                continue
+            if hasattr(candidate, "core"):
+                core = candidate.core
+                break
+        num_down = len(core.conv_tower_blocks) if core is not None and hasattr(core, "conv_tower_blocks") else 0
+        length_factor = 2 ** num_down if num_down > 0 else 1
+
         for start in range(0, raw_ids.numel(), stride):
             end = min(start + window_size, raw_ids.numel())
             window_raw = raw_ids[start:end].tolist()
             window_ids = self.tokenizer.build_inputs_with_special_tokens(window_raw)
+
+            if length_factor > 1:
+                pad_id = self.tokenizer.pad_token_id
+                if pad_id is None:
+                    pad_id = self.tokenizer.eos_token_id
+                if pad_id is None:
+                    pad_id = self.tokenizer.mask_token_id
+                orig_len = len(window_ids)
+                target_len = ((orig_len + length_factor - 1) // length_factor) * length_factor
+                if target_len != orig_len:
+                    window_ids = window_ids + [pad_id] * (target_len - orig_len)
+
             input_ids = torch.tensor([window_ids], device=self.device)
 
             special_mask = self.tokenizer.get_special_tokens_mask(
                 window_ids, already_has_special_tokens=True
             )
+            # If we padded, ensure padded positions are treated as special
+            if length_factor > 1 and pad_id is not None:
+                for i in range(len(window_ids) - 1, -1, -1):
+                    if window_ids[i] == pad_id:
+                        special_mask[i] = 1
+                    else:
+                        break
             candidate_indices = [i for i, m in enumerate(special_mask) if m == 0]
             if not candidate_indices:
                 continue
