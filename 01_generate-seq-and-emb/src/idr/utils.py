@@ -6,7 +6,7 @@ import gc
 import torch
 import torch.nn.functional as F
 import numpy as np
-from transformers import AutoTokenizer, AutoModelForMaskedLM
+from transformers import AutoTokenizer, AutoModel, AutoModelForMaskedLM
 from huggingface_hub import snapshot_download
 
 
@@ -81,18 +81,23 @@ class SequenceEvolver:
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         resolved_dtype = resolve_torch_dtype(device, torch_dtype)
         try:
-            self.model = AutoModelForMaskedLM.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                dtype=resolved_dtype,
-            ).to(device)
-        except TypeError:
-            self.model = AutoModelForMaskedLM.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                torch_dtype=resolved_dtype,
-            ).to(device)
+            self.model = self._load_pretrained(AutoModelForMaskedLM, model_path, resolved_dtype).to(device)
+            self.model_kind = "masked_lm"
+        except Exception as masked_lm_error:
+            self.model = self._load_pretrained(AutoModel, model_path, resolved_dtype).to(device)
+            self.model_kind = "base_model"
+            print(f"[{model_label}] AutoModelForMaskedLM load failed, using AutoModel fallback: {masked_lm_error}")
         self.model.eval()
+
+        species_map = getattr(getattr(self.model, "config", None), "species_to_token_id", None)
+        if isinstance(species_map, dict) and species_map:
+            self.needs_species_ids = True
+            self.species_id_value = species_map.get("human", next(iter(species_map.values())))
+        else:
+            self.needs_species_ids = False
+            self.species_id_value = None
+
+        self.has_ntv3_lm_head = self._get_ntv3_lm_head() is not None
         print(f"[{model_label}] Model loaded successfully.")
 
         if model_label == "DNABERT-2":
@@ -109,8 +114,94 @@ class SequenceEvolver:
         )
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
         with torch.inference_mode():
-            _ = self.model(**inputs)
+            _ = self.model(**self._build_model_inputs(inputs["input_ids"], inputs.get("attention_mask")))
         self._clear_cache()
+
+    def _load_pretrained(self, loader_cls, model_path, resolved_dtype):
+        try:
+            return loader_cls.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                dtype=resolved_dtype,
+            )
+        except TypeError:
+            return loader_cls.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                torch_dtype=resolved_dtype,
+            )
+
+    def _get_ntv3_lm_head(self):
+        for candidate in (
+            self.model,
+            getattr(self.model, "base_model", None),
+            getattr(self.model, "ntv3", None),
+            getattr(getattr(self.model, "base_model", None), "ntv3", None),
+        ):
+            if candidate is None:
+                continue
+            core = getattr(candidate, "core", None)
+            lm_head = getattr(core, "lm_head", None) if core is not None else None
+            head = getattr(lm_head, "head", None) if lm_head is not None else None
+            if callable(head):
+                return head
+        return None
+
+    def _build_model_inputs(self, input_ids, attention_mask=None):
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+
+        model_inputs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+        if self.needs_species_ids:
+            batch_size = input_ids.shape[0]
+            model_inputs["species_ids"] = torch.full(
+                (batch_size,),
+                int(self.species_id_value),
+                dtype=torch.long,
+                device=input_ids.device,
+            )
+        return model_inputs
+
+    def _extract_hidden_states(self, outputs):
+        hidden_states = getattr(outputs, "hidden_states", None)
+        if hidden_states is not None and len(hidden_states) > 0:
+            return hidden_states[-1]
+
+        last_hidden_state = getattr(outputs, "last_hidden_state", None)
+        if last_hidden_state is not None:
+            return last_hidden_state
+
+        if isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+            return outputs[0]
+
+        raise RuntimeError("Failed to extract hidden states from model outputs.")
+
+    def _compute_logits(self, input_ids, attention_mask=None, valid_token_len=None):
+        model_inputs = self._build_model_inputs(input_ids, attention_mask=attention_mask)
+        try:
+            outputs = self.model(**model_inputs, output_hidden_states=True, return_dict=True)
+        except TypeError:
+            outputs = self.model(**model_inputs)
+
+        logits = getattr(outputs, "logits", None)
+        if logits is None:
+            hidden = self._extract_hidden_states(outputs)
+            if valid_token_len is not None and hidden.shape[1] != valid_token_len:
+                hidden = hidden[:, :valid_token_len, :]
+
+            ntv3_head = self._get_ntv3_lm_head()
+            if ntv3_head is None:
+                raise RuntimeError(
+                    f"[{self.label}] Model output has no logits and no compatible NTv3 LM head was found."
+                )
+            logits = ntv3_head(hidden)
+
+        if valid_token_len is not None and logits.shape[1] != valid_token_len:
+            logits = logits[:, :valid_token_len, :]
+        return outputs, logits
 
     def get_embedding(self, sequence):
         """Extract mean pooling embedding for a DNA sequence."""
@@ -124,13 +215,17 @@ class SequenceEvolver:
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
         with torch.inference_mode():
-            base_model = self.model.base_model if hasattr(self.model, "base_model") else self.model
-            outputs = base_model(**inputs, return_dict=True)
-            if hasattr(outputs, "last_hidden_state"):
-                hidden_states = outputs.last_hidden_state
-            else:
-                hidden_states = outputs[0]
-            attention_mask = inputs["attention_mask"].unsqueeze(-1)
+            model_inputs = self._build_model_inputs(inputs["input_ids"], inputs.get("attention_mask"))
+            try:
+                outputs = self.model(**model_inputs, output_hidden_states=True, return_dict=True)
+            except TypeError:
+                outputs = self.model(**model_inputs)
+            hidden_states = self._extract_hidden_states(outputs)
+
+            attention_mask = model_inputs.get("attention_mask")
+            if attention_mask is None:
+                attention_mask = torch.ones(hidden_states.shape[:2], device=hidden_states.device, dtype=torch.long)
+            attention_mask = attention_mask.unsqueeze(-1)
 
             sum_embeddings = torch.sum(hidden_states * attention_mask, dim=1)
             sum_mask = torch.clamp(attention_mask.sum(dim=1), min=1e-9)
@@ -201,6 +296,7 @@ class SequenceEvolver:
             end = min(start + window_size, raw_ids.numel())
             window_raw = raw_ids[start:end].tolist()
             window_ids = self.tokenizer.build_inputs_with_special_tokens(window_raw)
+            valid_len = len(window_ids)
 
             if length_factor > 1:
                 pad_id = self.tokenizer.pad_token_id
@@ -208,12 +304,14 @@ class SequenceEvolver:
                     pad_id = self.tokenizer.eos_token_id
                 if pad_id is None:
                     pad_id = self.tokenizer.mask_token_id
-                orig_len = len(window_ids)
-                target_len = ((orig_len + length_factor - 1) // length_factor) * length_factor
-                if target_len != orig_len:
-                    window_ids = window_ids + [pad_id] * (target_len - orig_len)
+                target_len = ((valid_len + length_factor - 1) // length_factor) * length_factor
+                if target_len != valid_len:
+                    window_ids = window_ids + [pad_id] * (target_len - valid_len)
 
             input_ids = torch.tensor([window_ids], device=self.device)
+            attention_mask = torch.ones((1, len(window_ids)), dtype=torch.long, device=self.device)
+            if len(window_ids) > valid_len:
+                attention_mask[0, valid_len:] = 0
 
             special_mask = self.tokenizer.get_special_tokens_mask(
                 window_ids, already_has_special_tokens=True
@@ -234,8 +332,11 @@ class SequenceEvolver:
             input_ids[0, mask_indices] = self.tokenizer.mask_token_id
 
             with torch.no_grad():
-                outputs = self.model(input_ids)
-                logits = outputs.logits
+                outputs, logits = self._compute_logits(
+                    input_ids,
+                    attention_mask=attention_mask,
+                    valid_token_len=valid_len,
+                )
 
             mask_logits = logits[0, mask_indices, :]
             predicted_tokens = self.decode(mask_logits, strategy, temperature, top_k)
@@ -245,7 +346,7 @@ class SequenceEvolver:
             for local_pos, predicted_id in zip(mask_indices, predicted_tokens):
                 raw_ids[local_to_raw[int(local_pos)]] = predicted_id
 
-            del input_ids, outputs, logits, mask_logits, predicted_tokens
+            del input_ids, attention_mask, outputs, logits, mask_logits, predicted_tokens
             self._clear_cache()
 
             if end == raw_ids.numel():

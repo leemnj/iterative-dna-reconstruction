@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import numpy as np
 import gc
 from pathlib import Path
-from transformers import AutoTokenizer, AutoModelForMaskedLM
+from transformers import AutoTokenizer, AutoModel, AutoModelForMaskedLM
 from huggingface_hub import snapshot_download
 
 
@@ -95,84 +95,140 @@ def force_patch_triton_config(model_path):
 
 
 class SequenceEvolver:
-    """
-    DNA sequence evolution model using masked language models.
-    Supports DNABERT-2, Nucleotide Transformer, and other HuggingFace models.
-    """
-    
+    """DNA sequence evolution model supporting both MaskedLM and base AutoModel."""
+
     def __init__(self, model_path, model_label, device, torch_dtype="auto"):
-        """
-        Initialize the SequenceEvolver with a pretrained model.
-        
-        Args:
-            model_path (str): Path to the pretrained model or HuggingFace model ID
-            model_label (str): Label for the model (e.g., "DNABERT-2")
-            device (str): Device to load the model on ('cuda', 'mps', 'cpu')
-            torch_dtype (str or torch.dtype): Desired torch dtype for model weights
-        """
         self.label = model_label
         self.device = device
         print(f"[{model_label}] Loading model...")
-        
+
         self.tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
         resolved_dtype = resolve_torch_dtype(device, torch_dtype)
         try:
-            # Prefer new HF argument name to avoid deprecation warnings.
-            self.model = AutoModelForMaskedLM.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                dtype=resolved_dtype,
-            ).to(device)
-        except TypeError:
-            self.model = AutoModelForMaskedLM.from_pretrained(
-                model_path,
-                trust_remote_code=True,
-                torch_dtype=resolved_dtype,
-            ).to(device)
+            self.model = self._load_pretrained(AutoModelForMaskedLM, model_path, resolved_dtype).to(device)
+            self.model_kind = "masked_lm"
+        except Exception as masked_lm_error:
+            self.model = self._load_pretrained(AutoModel, model_path, resolved_dtype).to(device)
+            self.model_kind = "base_model"
+            print(f"[{model_label}] AutoModelForMaskedLM load failed, using AutoModel fallback: {masked_lm_error}")
         self.model.eval()
+
+        species_map = getattr(getattr(self.model, "config", None), "species_to_token_id", None)
+        if isinstance(species_map, dict) and species_map:
+            self.needs_species_ids = True
+            self.species_id_value = species_map.get("human", next(iter(species_map.values())))
+        else:
+            self.needs_species_ids = False
+            self.species_id_value = None
+
+        self.has_ntv3_lm_head = self._get_ntv3_lm_head() is not None
         print(f"[{model_label}] Model loaded successfully.")
 
         if model_label == "DNABERT-2":
-            # Warm up alibi cache to reduce repeated resize warnings.
-            max_len = 1024
-            dummy_seq = "A" * max_len
-            inputs = self.tokenizer(
-                dummy_seq,
-                return_tensors="pt",
-                padding=False,
-                truncation=True,
-                max_length=max_len,
+            self._warm_alibi_cache(max_len=1024)
+
+    def _warm_alibi_cache(self, max_len=1024):
+        dummy_seq = "A" * max_len
+        inputs = self.tokenizer(
+            dummy_seq,
+            return_tensors="pt",
+            padding=False,
+            truncation=True,
+            max_length=max_len,
+        )
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        with torch.inference_mode():
+            _ = self.model(**self._build_model_inputs(inputs["input_ids"], inputs.get("attention_mask")))
+        self._clear_cache()
+
+    def _load_pretrained(self, loader_cls, model_path, resolved_dtype):
+        try:
+            return loader_cls.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                dtype=resolved_dtype,
             )
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            with torch.inference_mode():
-                _ = self.model(**inputs)
-            self._clear_cache()
-        # DNABERT-2: alibi 캐시를 1024로 한번에 키우기
-        if model_label == "DNABERT-2":
-            max_len = 1024
-            dummy = "A" * max_len
-            inputs = self.tokenizer(
-                dummy,
-                return_tensors="pt",
-                padding=False,
-                truncation=True,
-                max_length=max_len,
+        except TypeError:
+            return loader_cls.from_pretrained(
+                model_path,
+                trust_remote_code=True,
+                torch_dtype=resolved_dtype,
             )
-            inputs = {k: v.to(self.device) for k, v in inputs.items()}
-            with torch.inference_mode():
-                _ = self.model(**inputs)
-            self._clear_cache()
-    
+
+    def _get_ntv3_lm_head(self):
+        for candidate in (
+            self.model,
+            getattr(self.model, "base_model", None),
+            getattr(self.model, "ntv3", None),
+            getattr(getattr(self.model, "base_model", None), "ntv3", None),
+        ):
+            if candidate is None:
+                continue
+            core = getattr(candidate, "core", None)
+            lm_head = getattr(core, "lm_head", None) if core is not None else None
+            head = getattr(lm_head, "head", None) if lm_head is not None else None
+            if callable(head):
+                return head
+        return None
+
+    def _build_model_inputs(self, input_ids, attention_mask=None):
+        if attention_mask is None:
+            attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+
+        model_inputs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+        if self.needs_species_ids:
+            batch_size = input_ids.shape[0]
+            model_inputs["species_ids"] = torch.full(
+                (batch_size,),
+                int(self.species_id_value),
+                dtype=torch.long,
+                device=input_ids.device,
+            )
+        return model_inputs
+
+    def _extract_hidden_states(self, outputs):
+        hidden_states = getattr(outputs, "hidden_states", None)
+        if hidden_states is not None and len(hidden_states) > 0:
+            return hidden_states[-1]
+
+        last_hidden_state = getattr(outputs, "last_hidden_state", None)
+        if last_hidden_state is not None:
+            return last_hidden_state
+
+        if isinstance(outputs, (tuple, list)) and len(outputs) > 0:
+            return outputs[0]
+
+        raise RuntimeError("Failed to extract hidden states from model outputs.")
+
+    def _compute_logits(self, input_ids, attention_mask=None, valid_token_len=None):
+        model_inputs = self._build_model_inputs(input_ids, attention_mask=attention_mask)
+        try:
+            outputs = self.model(**model_inputs, output_hidden_states=True, return_dict=True)
+        except TypeError:
+            outputs = self.model(**model_inputs)
+
+        logits = getattr(outputs, "logits", None)
+        if logits is None:
+            hidden = self._extract_hidden_states(outputs)
+            if valid_token_len is not None and hidden.shape[1] != valid_token_len:
+                hidden = hidden[:, :valid_token_len, :]
+
+            ntv3_head = self._get_ntv3_lm_head()
+            if ntv3_head is None:
+                raise RuntimeError(
+                    f"[{self.label}] Model output has no logits and no compatible NTv3 LM head was found."
+                )
+            logits = ntv3_head(hidden)
+
+        if valid_token_len is not None and logits.shape[1] != valid_token_len:
+            logits = logits[:, :valid_token_len, :]
+        return outputs, logits
+
     def get_embedding(self, sequence):
-        """
-        Extract mean pooling embedding for a DNA sequence.
-        
-        Args:
-            sequence (str): DNA sequence
-            
-        Returns:
-            np.ndarray: Embedding vector (mean pooled)
-        """
+        """Extract mean pooling embedding for a DNA sequence."""
         inputs = self.tokenizer(
             sequence,
             return_tensors="pt",
@@ -181,78 +237,65 @@ class SequenceEvolver:
             max_length=1024
         )
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
-        
+
         with torch.inference_mode():
-            base_model = self.model.base_model if hasattr(self.model, "base_model") else self.model
-            outputs = base_model(**inputs, return_dict=True)
-            if hasattr(outputs, "last_hidden_state"):
-                hidden_states = outputs.last_hidden_state
-            else:
-                # Some models ignore return_dict=True and return a tuple.
-                hidden_states = outputs[0]
-            attention_mask = inputs['attention_mask'].unsqueeze(-1)
-            
+            model_inputs = self._build_model_inputs(inputs["input_ids"], inputs.get("attention_mask"))
+            try:
+                outputs = self.model(**model_inputs, output_hidden_states=True, return_dict=True)
+            except TypeError:
+                outputs = self.model(**model_inputs)
+            hidden_states = self._extract_hidden_states(outputs)
+
+            attention_mask = model_inputs.get("attention_mask")
+            if attention_mask is None:
+                attention_mask = torch.ones(hidden_states.shape[:2], device=hidden_states.device, dtype=torch.long)
+            attention_mask = attention_mask.unsqueeze(-1)
+
             sum_embeddings = torch.sum(hidden_states * attention_mask, dim=1)
             sum_mask = torch.clamp(attention_mask.sum(dim=1), min=1e-9)
             mean_embedding = sum_embeddings / sum_mask
             embedding_numpy = mean_embedding.cpu().numpy()
-            
-            # Memory cleanup
+
             del outputs, hidden_states, attention_mask, sum_embeddings, sum_mask, mean_embedding
             self._clear_cache()
-        
+
         return embedding_numpy
-    
+
     def _clear_cache(self):
         """Clear GPU/MPS cache."""
         if self.device == "cuda":
             torch.cuda.empty_cache()
         elif self.device == "mps":
             torch.mps.empty_cache()
-    
+
     def decode(self, logits, strategy="greedy", temperature=1.0, top_k=50):
-        """
-        Decode logits using the specified strategy.
-        
-        Args:
-            logits (torch.Tensor): Model output logits
-            strategy (str): Decoding strategy ('greedy', 'sampling', 'top_k')
-            temperature (float): Sampling temperature
-            top_k (int): Number of top tokens to consider
-            
-        Returns:
-            torch.Tensor: Decoded token indices
-        """
+        """Decode logits using the specified strategy."""
         if strategy == "greedy":
             return torch.argmax(logits, dim=-1)
-        elif strategy == "sampling" or strategy == "top_k":
+        if strategy == "sampling" or strategy == "top_k":
             logits = logits / temperature
             if strategy == "top_k":
                 v, _ = torch.topk(logits, top_k)
-                logits[logits < v[:, [-1]]] = -float('Inf')
+                logits[logits < v[:, [-1]]] = -float("Inf")
             probs = F.softmax(logits, dim=-1)
             return torch.multinomial(probs, num_samples=1).squeeze(-1)
-        else:
-            raise ValueError(f"Unknown strategy: {strategy}")
-    
+        raise ValueError(f"Unknown strategy: {strategy}")
+
     def evolve_step(self, current_sequence, mask_ratio, strategy, temperature, top_k):
-        """
-        Evolve a sequence by one step using masked prediction.
-        
-        Args:
-            current_sequence (str): Current DNA sequence
-            mask_ratio (float): Ratio of nucleotides to mask (0-1)
-            strategy (str): Decoding strategy
-            temperature (float): Sampling temperature
-            top_k (int): Number of top tokens to consider
-            
-        Returns:
-            str: Evolved sequence
-        """
+        """Evolve a sequence by one step using masked prediction."""
         max_length = 1024
         num_special_tokens = self.tokenizer.num_special_tokens_to_add(pair=False)
         window_size = max(1, max_length - num_special_tokens)
         stride = max(1, window_size // 2)
+
+        if current_sequence is None:
+            raise ValueError("current_sequence is None; check your gene selection/fetching step.")
+        if isinstance(current_sequence, float) and np.isnan(current_sequence):
+            raise ValueError("current_sequence is NaN; check your gene selection/fetching step.")
+        if not isinstance(current_sequence, str):
+            current_sequence = str(current_sequence)
+        if current_sequence == "":
+            raise ValueError("current_sequence is empty; check your gene selection/fetching step.")
 
         raw_ids = self.tokenizer(
             current_sequence,
@@ -261,15 +304,50 @@ class SequenceEvolver:
         )["input_ids"]
         raw_ids = torch.tensor(raw_ids, device=self.device)
 
+        core = None
+        for candidate in (
+            getattr(self.model, "base_model", None),
+            getattr(self.model, "ntv3", None),
+            self.model,
+        ):
+            if candidate is None:
+                continue
+            if hasattr(candidate, "core"):
+                core = candidate.core
+                break
+        num_down = len(core.conv_tower_blocks) if core is not None and hasattr(core, "conv_tower_blocks") else 0
+        length_factor = 2 ** num_down if num_down > 0 else 1
+
         for start in range(0, raw_ids.numel(), stride):
             end = min(start + window_size, raw_ids.numel())
             window_raw = raw_ids[start:end].tolist()
             window_ids = self.tokenizer.build_inputs_with_special_tokens(window_raw)
+            valid_len = len(window_ids)
+
+            if length_factor > 1:
+                pad_id = self.tokenizer.pad_token_id
+                if pad_id is None:
+                    pad_id = self.tokenizer.eos_token_id
+                if pad_id is None:
+                    pad_id = self.tokenizer.mask_token_id
+                target_len = ((valid_len + length_factor - 1) // length_factor) * length_factor
+                if target_len != valid_len:
+                    window_ids = window_ids + [pad_id] * (target_len - valid_len)
+
             input_ids = torch.tensor([window_ids], device=self.device)
+            attention_mask = torch.ones((1, len(window_ids)), dtype=torch.long, device=self.device)
+            if len(window_ids) > valid_len:
+                attention_mask[0, valid_len:] = 0
 
             special_mask = self.tokenizer.get_special_tokens_mask(
                 window_ids, already_has_special_tokens=True
             )
+            if length_factor > 1 and pad_id is not None:
+                for i in range(len(window_ids) - 1, -1, -1):
+                    if window_ids[i] == pad_id:
+                        special_mask[i] = 1
+                    else:
+                        break
             candidate_indices = [i for i, m in enumerate(special_mask) if m == 0]
             if not candidate_indices:
                 continue
@@ -279,21 +357,21 @@ class SequenceEvolver:
             input_ids[0, mask_indices] = self.tokenizer.mask_token_id
 
             with torch.no_grad():
-                outputs = self.model(input_ids)
-                logits = outputs.logits
+                outputs, logits = self._compute_logits(
+                    input_ids,
+                    attention_mask=attention_mask,
+                    valid_token_len=valid_len,
+                )
 
             mask_logits = logits[0, mask_indices, :]
             predicted_tokens = self.decode(mask_logits, strategy, temperature, top_k)
 
-            # Map window token positions back to raw indices.
             window_raw_positions = [i for i, m in enumerate(special_mask) if m == 0]
-            local_to_raw = {
-                pos: start + idx for idx, pos in enumerate(window_raw_positions)
-            }
+            local_to_raw = {pos: start + idx for idx, pos in enumerate(window_raw_positions)}
             for local_pos, predicted_id in zip(mask_indices, predicted_tokens):
                 raw_ids[local_to_raw[int(local_pos)]] = predicted_id
 
-            del input_ids, outputs, logits, mask_logits, predicted_tokens
+            del input_ids, attention_mask, outputs, logits, mask_logits, predicted_tokens
             self._clear_cache()
 
             if end == raw_ids.numel():
@@ -304,41 +382,25 @@ class SequenceEvolver:
         self._clear_cache()
 
         return restored_sequence.replace(" ", "")
-    
-    def run(self, sequence, steps, mask_ratio, strategy, temperature, top_k, 
+
+    def run(self, sequence, steps, mask_ratio, strategy, temperature, top_k,
             save_all=True, save_interval=1):
-        """
-        Run iterative sequence evolution.
-        
-        Args:
-            sequence (str): Original DNA sequence
-            steps (int): Number of evolution steps
-            mask_ratio (float): Masking ratio per step
-            strategy (str): Decoding strategy
-            temperature (float): Sampling temperature
-            top_k (int): Number of top tokens to consider
-            save_all (bool): Whether to save all intermediate sequences
-            save_interval (int): Interval for saving when save_all=False
-            
-        Returns:
-            list: List of evolved sequences
-        """
+        """Run iterative sequence evolution."""
         current_seq = sequence
         sequence_history = [current_seq] if save_all or save_interval == 1 else []
-        
+
         for step in range(steps):
             current_seq = self.evolve_step(
                 current_seq, mask_ratio, strategy, temperature, top_k
             )
-            
+
             if save_all or (step + 1) % save_interval == 0 or step == steps - 1:
                 sequence_history.append(current_seq)
-            
-            # Periodic memory cleanup
+
             if (step + 1) % 10 == 0:
                 gc.collect()
                 self._clear_cache()
-        
+
         return sequence_history
 
 
