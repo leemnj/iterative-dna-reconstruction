@@ -3,3 +3,4 @@ data/gencode.v46.annotation.gtf.gz.feather
 notebook
 03_dna-fm-to-alphagenome/regulator-to-alphagenome/GRCh38-cCREs.bed
 data/evo-phage-seq.csv
+.DS_Store
