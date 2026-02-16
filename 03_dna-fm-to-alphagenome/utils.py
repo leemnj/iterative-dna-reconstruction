@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from itertools import zip_longest
 from pathlib import Path
 from typing import Tuple
 
@@ -191,3 +192,74 @@ def get_sequence(
     seq_normalized = normalize_sequence(seq_raw)
 
     return seq_normalized
+
+
+def mutation_table(
+    reference: str,
+    query: str,
+    position_start: int = 1,
+) -> pd.DataFrame:
+    """Return per-position differences between reference and query sequences."""
+    records = []
+    for i, (ref_base, qry_base) in enumerate(
+        zip_longest(reference, query, fillvalue="-")
+    ):
+        if ref_base != qry_base:
+            records.append(
+                {
+                    "position": position_start + i,
+                    "reference": ref_base,
+                    "query": qry_base,
+                }
+            )
+    return pd.DataFrame(records, columns=["position", "reference", "query"])
+
+
+def render_sequence_diff_html(
+    reference: str,
+    query: str,
+    line_width: int = 100,
+) -> str:
+    """Render query sequence with changed positions highlighted against reference."""
+    if line_width <= 0:
+        raise ValueError("line_width must be > 0")
+
+    length = max(len(reference), len(query))
+    ref_padded = reference.ljust(length, "-")
+    qry_padded = query.ljust(length, "-")
+
+    lines = []
+    for start in range(0, length, line_width):
+        end = min(start + line_width, length)
+        ref_chunk = ref_padded[start:end]
+        qry_chunk = qry_padded[start:end]
+
+        marker_chars = []
+        qry_html_chars = []
+        for ref_base, qry_base in zip(ref_chunk, qry_chunk):
+            changed = ref_base != qry_base
+            marker_chars.append("|" if changed else " ")
+            if changed:
+                qry_html_chars.append(
+                    "<span style='background:#ffd6d6;color:#a40000;font-weight:700;'>"
+                    f"{qry_base}</span>"
+                )
+            else:
+                qry_html_chars.append(qry_base)
+
+        pos = f"{start + 1:>4}-{end:<4}"
+        lines.append(f"{pos} REF {ref_chunk}")
+        lines.append(f"{'':>10} CHG {''.join(marker_chars)}")
+        lines.append(f"{'':>10} QRY {''.join(qry_html_chars)}")
+        lines.append("")
+
+    legend = (
+        "<div style='margin-bottom:8px;'>"
+        "<span style='background:#ffd6d6;color:#a40000;font-weight:700;'>A/C/G/T/-</span>"
+        " = changed base in query"
+        "</div>"
+    )
+    body = "<pre style='font-family: Menlo, Consolas, monospace; font-size: 12px;'>"
+    body += "\n".join(lines)
+    body += "</pre>"
+    return legend + body
